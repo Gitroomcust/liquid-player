@@ -6,10 +6,10 @@
   "scripts": {
     "start": "electron .",
     "check": "node --check src/main.js && node --check src/preload.js && node --check src/system-media.js && node --check src/renderer/app.js && node --check src/renderer/viz.js",
-    "dist:win": "electron-builder --win",
-    "dist:mac": "electron-builder --mac",
-    "dist:linux": "electron-builder --linux",
-    "dist": "electron-builder --win --mac --linux"
+    "dist:win": "electron-builder --win --publish never",
+    "dist:mac": "electron-builder --mac --publish never",
+    "dist:linux": "electron-builder --linux --publish never",
+    "dist": "electron-builder --win --mac --linux --publish never"
   },
   "license": "MIT",
   "devDependencies": {
