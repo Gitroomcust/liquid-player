@@ -36,6 +36,7 @@ let failedMiniCover = null;
 
 const fmtTime = (s) => { s = Math.max(0, Math.floor(s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : '');
+const platformText = (android, desktop) => runtimePlatform === 'android' ? android : desktop;
 
 function greeting() {
   const h = new Date().getHours();
@@ -55,6 +56,10 @@ function appName(id = '') {
   ];
   for (const [re, name] of rules) if (re.test(id)) return name;
   return id.replace(/\.exe$/i, '').split('!')[0].split('_')[0] || 'Приложение';
+}
+
+function sessionAppName(item, id = item?.id) {
+  return item?.app || appName(id);
 }
 
 const plural = (n, one, few, many) => {
@@ -110,7 +115,7 @@ function updateVisualizerSource() {
 function refreshSystemSummary() {
   const count = state.sessions.length;
   const listening = captureActive();
-  $('#sys-sub').textContent = `${count} ${plural(count, 'трек', 'трека', 'треков')} · звук ПК: ${listening ? 'слушаю' : 'недоступен'}`;
+  $('#sys-sub').textContent = `${count} ${plural(count, 'трек', 'трека', 'треков')} · ${platformText('звук телефона', 'звук ПК')}: ${listening ? 'слушаю' : 'недоступен'}`;
   $('.live-dot').classList.toggle('off', !listening);
 }
 
@@ -299,8 +304,8 @@ function renderList() {
   systemListSignature = signature;
   const fragment = document.createDocumentFragment();
   fragment.appendChild(trackRow({
-    title: 'Весь звук компьютера',
-    sub: 'Любой звук, который играет на ПК',
+    title: platformText('Весь звук телефона', 'Весь звук компьютера'),
+    sub: platformText('Любой звук, который играет на телефоне', 'Любой звук, который играет на ПК'),
     badge: captureActive() ? 'Слушаю' : 'Недоступно',
     playing: captureActive(),
     current: state.current?.kind === 'capture',
@@ -322,7 +327,7 @@ function renderList() {
     state.sessions.forEach((item, index) => fragment.appendChild(trackRow({
       cover: item.thumb,
       title: item.title || 'Без названия',
-      sub: [item.artist, appName(item.id)].filter(Boolean).join(' · '),
+      sub: [item.artist, sessionAppName(item)].filter(Boolean).join(' · '),
       badge: item.status === 'Playing' ? 'Играет' : item.status === 'Paused' ? 'Пауза' : 'Стоп',
       playing: item.status === 'Playing',
       current: state.current?.kind === 'system' && state.current.id === item.id,
@@ -520,7 +525,7 @@ function updateLocalSummary() {
   const count = state.local.tracks.length;
   $('#local-sub').textContent = state.local.dir
     ? `${localFolderName()} · ${count} ${plural(count, 'трек', 'трека', 'треков')}`
-    : 'Выбрать папку с музыкой на компьютере';
+    : platformText('Выбрать папку с музыкой на телефоне', 'Выбрать папку с музыкой на компьютере');
   if (state.source === 'local') $('#list-sub').textContent = `${count} треков · ${state.local.dir}`;
 }
 
@@ -621,7 +626,7 @@ function sessionById(id) { return state.sessions.find((item) => item.id === id);
 async function selectCapture() {
   audio.pause();
   state.current = { kind: 'capture' };
-  openPlayer({ cover: null, title: 'Весь звук компьютера', artist: '', source: 'Системный звук' }, true);
+  openPlayer({ cover: null, title: platformText('Весь звук телефона', 'Весь звук компьютера'), artist: '', source: 'Системный звук' }, true);
   const stream = await startSystemAudio();
   setPlayingUI(!!stream);
   updateVisualizerSource();
@@ -633,7 +638,7 @@ async function selectSystem(id) {
   audio.pause();
   state.current = { kind: 'system', id };
   state.sys = { position: item.position, duration: item.duration, status: item.status, at: performance.now() };
-  openPlayer({ cover: item.thumb, title: item.title, artist: item.artist, source: appName(item.id) }, true);
+  openPlayer({ cover: item.thumb, title: item.title, artist: item.artist, source: sessionAppName(item) }, true);
   setPlayingUI(item.status === 'Playing');
   setSeek(item.position, item.duration);
   updateVisualizerSource();
@@ -646,14 +651,14 @@ function applySessions(sessions) {
   if (state.current?.kind === 'system') {
     const item = sessionById(state.current.id);
     if (!item) {
-      setMeta({ title: 'Воспроизведение завершено', artist: '', source: appName(state.current.id) });
+      setMeta({ title: 'Воспроизведение завершено', artist: '', source: sessionAppName(null, state.current.id) });
       setPlayingUI(false);
       updateVisualizerSource();
       return;
     }
     const previousTitle = $('#np-title').textContent;
     if (item.title !== previousTitle || (item.thumb && item.thumb !== currentCover)) setCover(item.thumb);
-    setMeta({ title: item.title, artist: item.artist, source: appName(item.id) });
+    setMeta({ title: item.title, artist: item.artist, source: sessionAppName(item) });
     const estimate = state.sys.status === 'Playing'
       ? state.sys.position + (performance.now() - state.sys.at) / 1000
       : state.sys.position;
@@ -736,7 +741,7 @@ document.querySelectorAll('.source').forEach((button) => button.addEventListener
 
 function currentTrackInfo() {
   if (state.current?.kind === 'capture') {
-    return { cover: null, title: 'Весь звук компьютера', artist: '', source: 'Системный звук' };
+    return { cover: null, title: platformText('Весь звук телефона', 'Весь звук компьютера'), artist: '', source: 'Системный звук' };
   }
   if (state.current?.kind === 'local') {
     const track = state.local.tracks[state.current.index];
@@ -748,14 +753,18 @@ function currentTrackInfo() {
     };
   }
   const item = sessionById(state.current.id) || {};
-  return { cover: item.thumb, title: item.title || $('#np-title').textContent, artist: item.artist || '', source: appName(state.current.id) };
+  return { cover: item.thumb, title: item.title || $('#np-title').textContent, artist: item.artist || '', source: sessionAppName(item, state.current.id) };
 }
 
 /* ---------- Init ---------- */
 window.api.onSystemSessions(applySessions);
 window.api.onTracksMeta(applyTrackMetadata);
-window.api.onCaptureFrame?.(({ frequencyData }) => {
-  if (frequencyData) androidFrequency = Uint8Array.from(frequencyData);
+window.api.onCaptureFrame?.(({ frequency }) => {
+  if (!frequency) return;
+  const decoded = atob(frequency);
+  const length = Math.min(decoded.length, androidFrequency.length);
+  for (let i = 0; i < length; i++) androidFrequency[i] = decoded.charCodeAt(i);
+  androidFrequency.fill(0, length);
 });
 window.api.onCaptureState?.(({ active }) => {
   androidCaptureActive = !!active;
@@ -779,6 +788,7 @@ window.api.onBackButton?.(() => {
 (async () => {
   const { name, platform } = await window.api.getUser();
   runtimePlatform = platform;
+  $('#local-sub').textContent = platformText('Выбрать папку с музыкой на телефоне', 'Выбрать папку с музыкой на компьютере');
   $('#greet').textContent = `${greeting()}, ${cap(name) || 'друг'}`;
   $('#greet-date').textContent = new Date().toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
   refreshSystemSummary();

@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.media.MediaMetadata;
 import android.media.MediaMetadataRetriever;
 import android.media.session.MediaController;
@@ -12,6 +13,7 @@ import android.media.session.MediaSessionManager;
 import android.media.session.PlaybackState;
 import android.net.Uri;
 import android.os.Build;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.provider.Settings.Secure;
 import android.graphics.Bitmap;
@@ -44,6 +46,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
@@ -72,8 +75,36 @@ public class LiquidPlayerPlugin extends Plugin {
     private final Map<String, MediaController> controllers = new HashMap<>();
     private final Map<String, MediaController.Callback> controllerCallbacks = new HashMap<>();
     private final Map<String, String> sessionSnapshots = new HashMap<>();
-    private final Map<String, Long> sessionPositions = new HashMap<>();
+    private final Map<String, Double> sessionPositions = new HashMap<>();
+    private final Map<String, ThumbnailCache> thumbnailCache = new HashMap<>();
+    private final Map<String, String> applicationLabels = new HashMap<>();
     private volatile boolean sessionAccess;
+
+    private static final class ThumbnailCache {
+        final String title;
+        final String artist;
+        final String album;
+        final int width;
+        final int height;
+        final String dataUrl;
+
+        ThumbnailCache(String title, String artist, String album, int width, int height, String dataUrl) {
+            this.title = title;
+            this.artist = artist;
+            this.album = album;
+            this.width = width;
+            this.height = height;
+            this.dataUrl = dataUrl;
+        }
+
+        boolean matches(String title, String artist, String album, int width, int height) {
+            return Objects.equals(this.title, title)
+                && Objects.equals(this.artist, artist)
+                && Objects.equals(this.album, album)
+                && this.width == width
+                && this.height == height;
+        }
+    }
 
     @Override
     public void load() {
@@ -324,6 +355,7 @@ public class LiquidPlayerPlugin extends Plugin {
                 controllers.clear();
                 sessionSnapshots.clear();
                 sessionPositions.clear();
+                thumbnailCache.clear();
                 JSObject payload = new JSObject();
                 payload.put("sessions", new JSArray());
                 notifyListeners("systemSessions", payload);
@@ -336,7 +368,7 @@ public class LiquidPlayerPlugin extends Plugin {
             JSArray result = new JSArray();
             Map<String, MediaController> next = new HashMap<>();
             Map<String, String> snapshots = new HashMap<>();
-            Map<String, Long> positions = new HashMap<>();
+            Map<String, Double> positions = new HashMap<>();
             boolean changed = false;
             for (MediaController controller : active) {
                 String id = controller.getPackageName() + ":" + controller.getSessionToken().hashCode();
@@ -361,16 +393,22 @@ public class LiquidPlayerPlugin extends Plugin {
                 long duration = metadata == null ? 0 : metadata.getLong(MediaMetadata.METADATA_KEY_DURATION);
                 String status = state != null && state.getState() == PlaybackState.STATE_PLAYING ? "Playing"
                     : state != null && state.getState() == PlaybackState.STATE_PAUSED ? "Paused" : "Stopped";
-                long position = state == null ? 0 : state.getPosition() / 1000;
-                String thumb = thumbnail(metadata);
+                double positionMillis = state == null ? 0 : state.getPosition();
+                if (state != null && state.getState() == PlaybackState.STATE_PLAYING) {
+                    positionMillis += (SystemClock.elapsedRealtime() - state.getLastPositionUpdateTime())
+                        * state.getPlaybackSpeed();
+                }
+                double position = positionMillis / 1000.0;
+                String thumb = thumbnail(id, metadata, title, artist, album);
                 String snapshot = title + "\u0001" + artist + "\u0001" + album + "\u0001" + status + "\u0001" + duration + "\u0001" + thumb.length();
                 String previous = sessionSnapshots.get(id);
                 snapshots.put(id, snapshot);
                 positions.put(id, position);
-                Long oldPosition = sessionPositions.get(id);
+                Double oldPosition = sessionPositions.get(id);
                 if (!snapshot.equals(previous) || oldPosition == null || Math.abs(position - oldPosition) > 2) changed = true;
                 JSObject item = new JSObject();
                 item.put("id", id);
+                item.put("app", applicationLabel(controller.getPackageName()));
                 item.put("title", title == null ? "" : title);
                 item.put("artist", artist == null ? "" : artist);
                 item.put("album", album == null ? "" : album);
@@ -386,6 +424,7 @@ public class LiquidPlayerPlugin extends Plugin {
                     if (!next.containsKey(oldId)) {
                         MediaController previousController = controllers.get(oldId);
                         if (previousController != null) previousController.unregisterCallback(controllerCallbacks.remove(oldId));
+                        thumbnailCache.remove(oldId);
                     }
                 }
                 controllers.clear();
@@ -402,16 +441,37 @@ public class LiquidPlayerPlugin extends Plugin {
         } catch (Exception ignored) {}
     }
 
-    private String thumbnail(MediaMetadata metadata) {
-        if (metadata == null) return "";
-        Bitmap image = metadata.getBitmap(MediaMetadata.METADATA_KEY_ART);
-        if (image == null) image = metadata.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART);
-        if (image == null) return "";
-        Bitmap scaled = Bitmap.createScaledBitmap(image, Math.min(128, image.getWidth()), Math.min(128, image.getHeight()), true);
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
-        scaled.compress(Bitmap.CompressFormat.JPEG, 80, output);
-        if (scaled != image) scaled.recycle();
-        return "data:image/jpeg;base64," + Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP);
+    private String thumbnail(String id, MediaMetadata metadata, String title, String artist, String album) {
+        Bitmap image = metadata == null ? null : metadata.getBitmap(MediaMetadata.METADATA_KEY_ART);
+        if (image == null && metadata != null) image = metadata.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART);
+        int width = image == null ? 0 : image.getWidth();
+        int height = image == null ? 0 : image.getHeight();
+        ThumbnailCache cached = thumbnailCache.get(id);
+        if (cached != null && cached.matches(title, artist, album, width, height)) return cached.dataUrl;
+
+        String dataUrl = "";
+        if (image != null) {
+            Bitmap scaled = Bitmap.createScaledBitmap(image, Math.min(128, width), Math.min(128, height), true);
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            scaled.compress(Bitmap.CompressFormat.JPEG, 80, output);
+            if (scaled != image) scaled.recycle();
+            dataUrl = "data:image/jpeg;base64," + Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP);
+        }
+        thumbnailCache.put(id, new ThumbnailCache(title, artist, album, width, height, dataUrl));
+        return dataUrl;
+    }
+
+    private String applicationLabel(String packageName) {
+        String cached = applicationLabels.get(packageName);
+        if (cached != null) return cached;
+        String label = packageName;
+        try {
+            PackageManager manager = getContext().getPackageManager();
+            CharSequence value = manager.getApplicationLabel(manager.getApplicationInfo(packageName, 0));
+            if (value != null && value.length() > 0) label = value.toString();
+        } catch (PackageManager.NameNotFoundException ignored) {}
+        applicationLabels.put(packageName, label);
+        return label;
     }
 
     @PluginMethod

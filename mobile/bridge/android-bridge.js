@@ -54,7 +54,7 @@
     systemControl: (id, action) => native?.systemControl ? native.systemControl({ id, action }) : Promise.resolve(false),
     onSystemSessions: (callback) => subscribe(native, 'systemSessions', ({ sessions }) => callback(sessions || [])),
     onTracksMeta: (callback) => subscribe(native, 'tracksMeta', callback),
-    toMediaUrl: (path) => Capacitor?.convertFileSrc ? Capacitor.convertFileSrc(path) : path,
+    toMediaUrl: (path) => `${location.origin}/_liquid_media_?u=${encodeURIComponent(path)}`,
     toCoverUrl: (path) => {
       if (!Capacitor?.convertFileSrc || !coverDir) return null;
       return Capacitor.convertFileSrc(`file://${coverDir}/${window.LiquidPlayerFNV1a32(path)}.jpg`);

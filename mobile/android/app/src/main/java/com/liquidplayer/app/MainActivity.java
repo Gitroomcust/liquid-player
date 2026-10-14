@@ -8,5 +8,6 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(LiquidPlayerPlugin.class);
         super.onCreate(savedInstanceState);
+        bridge.setWebViewClient(new LiquidWebViewClient(bridge));
     }
 }
