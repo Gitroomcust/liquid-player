@@ -114,16 +114,20 @@ public class LiquidPlayerPlugin extends Plugin {
 
     static void emitCaptureFrame(JSObject frame) {
         LiquidPlayerPlugin plugin = instance;
-        if (plugin != null) plugin.getActivity().runOnUiThread(() -> plugin.notifyListeners("captureFrame", frame));
+        if (plugin == null) return;
+        Activity activity = plugin.getActivity();
+        if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
+        activity.runOnUiThread(() -> plugin.notifyListeners("captureFrame", frame));
     }
 
     static void emitCaptureState(boolean active) {
         LiquidPlayerPlugin plugin = instance;
-        if (plugin != null) {
-            JSObject state = new JSObject();
-            state.put("active", active);
-            plugin.getActivity().runOnUiThread(() -> plugin.notifyListeners("captureState", state));
-        }
+        if (plugin == null) return;
+        Activity activity = plugin.getActivity();
+        if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
+        JSObject state = new JSObject();
+        state.put("active", active);
+        activity.runOnUiThread(() -> plugin.notifyListeners("captureState", state));
     }
 
     @PluginMethod
@@ -530,5 +534,23 @@ public class LiquidPlayerPlugin extends Plugin {
     public void stopCapture(PluginCall call) {
         getContext().stopService(new Intent(getContext(), PlaybackCaptureService.class));
         call.resolve();
+    }
+
+    @Override
+    protected void handleOnDestroy() {
+        Context context = getContext();
+        if (context != null) context.stopService(new Intent(context, PlaybackCaptureService.class));
+        sessionWorker.shutdownNow();
+        metadataWorkers.shutdownNow();
+        synchronized (this) {
+            for (Map.Entry<String, MediaController.Callback> entry : controllerCallbacks.entrySet()) {
+                MediaController controller = controllers.get(entry.getKey());
+                if (controller != null) controller.unregisterCallback(entry.getValue());
+            }
+            controllerCallbacks.clear();
+            controllers.clear();
+        }
+        if (instance == this) instance = null;
+        super.handleOnDestroy();
     }
 }
