@@ -21,6 +21,20 @@ npm start
 Требуется Node.js 18+. На Windows должна работать служба «Windows Audio» (на обычных ПК она включена по умолчанию),
 иначе система не отдаёт медиа-сессии других приложений.
 
+## Скачать
+Готовые сборки — на странице [Releases](https://github.com/Gitroomcust/liquid-player/releases), отдельно для каждой системы:
+- **Windows** — `liquid-player-<версия>-windows-x64-setup.exe` (установщик) или `...-portable.exe` (без установки)
+- **macOS** — `liquid-player-<версия>-mac-arm64.zip` (Apple Silicon) / `...-mac-x64.zip` (Intel). Сборка не подписана: при первом запуске — ПКМ по приложению → «Открыть»
+- **Linux** — `.AppImage`, `.deb` или `.tar.gz`
+
+## Сборка
+```bash
+npm run dist:linux   # AppImage, deb, tar.gz
+npm run dist:mac     # zip (x64 + arm64)
+npm run dist:win     # setup.exe + portable.exe (на Linux нужен wine, напр. образ electronuserland/builder:wine)
+```
+Артефакты появляются в `dist/`.
+
 ## Структура
 - `src/main.js` — главный процесс: окно, выбор папки, чтение тегов (`music-metadata`), протокол `media://` для локальных файлов, loopback-аудио
 - `src/system-media.js` — опрос медиа-сессий других приложений (каждые 1.5 с)

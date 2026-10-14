@@ -18,7 +18,7 @@ function run(cmd, args, opts = {}) {
   });
 }
 
-const PS_SCRIPT = path.join(__dirname, '..', 'scripts', 'media-sessions.ps1');
+const PS_SCRIPT = path.join(__dirname, '..', 'scripts', 'media-sessions.ps1').replace('app.asar', 'app.asar.unpacked');
 
 async function queryWindows(action, target) {
   const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', PS_SCRIPT];
