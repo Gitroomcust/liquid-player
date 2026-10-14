@@ -1,0 +1,8 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Liquid Player</string>
+    <string name="title_activity_main">Liquid Player</string>
+    <string name="notification_listener_label">Доступ к плеерам</string>
+    <string name="package_name">com.liquidplayer.app</string>
+    <string name="custom_url_scheme">com.liquidplayer.app</string>
+</resources>

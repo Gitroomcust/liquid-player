@@ -1,0 +1,8 @@
+{
+  "appId": "com.liquidplayer.app",
+  "appName": "Liquid Player",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "http"
+  }
+}

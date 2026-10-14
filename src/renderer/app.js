@@ -21,6 +21,14 @@ let systemSource = null;
 let systemGain = null;
 let captureStartPromise = null;
 let runtimePlatform = '';
+let androidCaptureActive = false;
+let androidFrequency = new Uint8Array(1024);
+const androidAnalyser = {
+  frequencyBinCount: 1024,
+  getByteFrequencyData(target) {
+    target.set(androidFrequency.subarray(0, target.length));
+  },
+};
 let systemListSignature = '';
 let currentCover = null;
 let failedCover = null;
@@ -76,6 +84,7 @@ function ensureCtx() {
 }
 
 function captureActive() {
+  if (runtimePlatform === 'android') return androidCaptureActive;
   return !!systemStream && systemStream.getAudioTracks().some((track) => track.readyState === 'live');
 }
 
@@ -188,9 +197,17 @@ async function acquireSystemAudio() {
 }
 
 async function startSystemAudio() {
-  if (captureActive()) return systemStream;
+  if (captureActive()) return runtimePlatform === 'android' ? { android: true } : systemStream;
   if (captureStartPromise) return captureStartPromise;
   captureStartPromise = (async () => {
+    if (runtimePlatform === 'android') {
+      const active = await window.api.startCapture();
+      androidCaptureActive = !!active;
+      sysAnalyser = androidAnalyser;
+      refreshSystemSummary();
+      if (state.source === 'system' && state.screen === 'list') renderList();
+      return active ? { android: true } : null;
+    }
     const stream = await acquireSystemAudio();
     if (!stream) return null;
     try {
@@ -213,6 +230,15 @@ async function startSystemAudio() {
 }
 
 function stopSystemAudio() {
+  if (runtimePlatform === 'android') {
+    androidCaptureActive = false;
+    void window.api.stopCapture();
+    if (state.current?.kind === 'capture') setPlayingUI(false);
+    refreshSystemSummary();
+    updateVisualizerSource();
+    if (state.source === 'system' && state.screen === 'list') renderList();
+    return;
+  }
   const stream = systemStream;
   if (!stream) return;
   systemStream = null;
@@ -258,6 +284,7 @@ function renderList() {
   $('#list-sub').textContent = 'Поиск идёт постоянно — список обновляется сам';
   const signature = JSON.stringify({
     capture: captureActive(),
+    sessionAccess: !!window.api.needsSessionAccess?.(),
     sessions: state.sessions.map((item) => [item.id, item.title, item.artist, item.status, item.thumb?.length || 0]),
   });
   if (signature === systemListSignature) {
@@ -281,6 +308,14 @@ function renderList() {
     onClick: selectCapture,
     delay: 0,
   }));
+  if (window.api.needsSessionAccess?.()) {
+    fragment.appendChild(trackRow({
+      title: 'Доступ к плеерам',
+      sub: 'Нажмите, чтобы разрешить',
+      onClick: () => window.api.requestSessionAccess(),
+      delay: 1,
+    }));
+  }
   if (!state.sessions.length) {
     fragment.appendChild(emptyMessage('Пока ничего не играет', 'Включите музыку в любом приложении — Spotify, браузере, Яндекс Музыке… Трек появится здесь автоматически.'));
   } else {
@@ -587,7 +622,7 @@ async function selectCapture() {
   audio.pause();
   state.current = { kind: 'capture' };
   openPlayer({ cover: null, title: 'Весь звук компьютера', artist: '', source: 'Системный звук' }, true);
-  const stream = captureActive() ? systemStream : await startSystemAudio();
+  const stream = await startSystemAudio();
   setPlayingUI(!!stream);
   updateVisualizerSource();
 }
@@ -719,6 +754,27 @@ function currentTrackInfo() {
 /* ---------- Init ---------- */
 window.api.onSystemSessions(applySessions);
 window.api.onTracksMeta(applyTrackMetadata);
+window.api.onCaptureFrame?.(({ frequencyData }) => {
+  if (frequencyData) androidFrequency = Uint8Array.from(frequencyData);
+});
+window.api.onCaptureState?.(({ active }) => {
+  androidCaptureActive = !!active;
+  if (!active && state.current?.kind === 'capture') setPlayingUI(false);
+  refreshSystemSummary();
+  updateVisualizerSource();
+  if (state.source === 'system' && state.screen === 'list') renderList();
+});
+window.api.onSessionAccess?.(() => {
+  if (state.source === 'system' && state.screen === 'list') {
+    systemListSignature = '';
+    renderList();
+  }
+});
+window.api.onBackButton?.(() => {
+  if (state.screen === 'player') showScreen('list');
+  else if (state.screen === 'list') showScreen('home');
+  else void window.api.minimizeApp?.();
+});
 
 (async () => {
   const { name, platform } = await window.api.getUser();
