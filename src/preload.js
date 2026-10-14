@@ -9,5 +9,11 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('system-sessions', handler);
     return () => ipcRenderer.removeListener('system-sessions', handler);
   },
-  toMediaUrl: (p) => 'media://local/' + encodeURIComponent(p.split(String.fromCharCode(92)).join('/').replace(/^([a-zA-Z]):\//, '$1/')).replace(/%2F/g, '/'),
+  onTracksMeta: (cb) => {
+    const handler = (_event, payload) => cb(payload);
+    ipcRenderer.on('tracks-meta', handler);
+    return () => ipcRenderer.removeListener('tracks-meta', handler);
+  },
+  toMediaUrl: (p) => `media://local/?p=${encodeURIComponent(p)}`,
+  toCoverUrl: (p) => `media://cover/?p=${encodeURIComponent(p)}`,
 });

@@ -2,8 +2,9 @@
 window.Viz = (() => {
   const canvas = document.getElementById('viz');
   const ctx = canvas.getContext('2d');
-  let w = 0, h = 0, dpr = 1;
+  let w = 0, h = 0;
   let t = 0;
+  let lastFrame = 0;
   let bins = new Float32Array(64);
   let smooth = new Float32Array(64);
   let energy = 0, energyTarget = 0;
@@ -16,9 +17,9 @@ window.Viz = (() => {
   let synth = false;
 
   function resize() {
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
-    w = canvas.width = Math.floor(innerWidth * dpr);
-    h = canvas.height = Math.floor(innerHeight * dpr);
+    const scale = Math.min(0.5, 960 / Math.max(1, innerWidth));
+    w = canvas.width = Math.max(1, Math.floor(innerWidth * scale));
+    h = canvas.height = Math.max(1, Math.floor(innerHeight * scale));
   }
   addEventListener('resize', resize);
   resize();
@@ -84,7 +85,7 @@ window.Viz = (() => {
     ctx.fillStyle = grad;
     ctx.beginPath();
     ctx.moveTo(0, h);
-    const steps = 140;
+    const steps = 64;
     for (let s = 0; s <= steps; s++) {
       const x = s / steps;
       const idle = Math.sin(x * 6.3 + t * speed + layer * 1.7) * 0.5 + Math.sin(x * 3.1 - t * speed * 0.7 + layer) * 0.5;
@@ -112,15 +113,21 @@ window.Viz = (() => {
     }
   }
 
-  function frame() {
-    t += 0.016;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    if (document.hidden) {
+      lastFrame = now;
+      return;
+    }
+    if (energy < 0.02 && energyTarget < 0.02 && surge < 0.03 && now - lastFrame < 32) return;
+    t += lastFrame ? Math.min(0.05, (now - lastFrame) / 1000) : 0.016;
+    lastFrame = now;
     sample();
     ctx.clearRect(0, 0, w, h);
     ctx.globalCompositeOperation = 'lighter';
     drawBlobs();
     for (let i = 0; i < 3; i++) drawWave(i, palette[i % palette.length], 0.30 + energy * 0.25 + surge * 0.2);
     ctx.globalCompositeOperation = 'source-over';
-    requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
 
@@ -133,7 +140,8 @@ window.Viz = (() => {
         c.width = c.height = 24;
         const x = c.getContext('2d');
         x.drawImage(img, 0, 0, 24, 24);
-        const d = x.getImageData(0, 0, 24, 24).data;
+        let d;
+        try { d = x.getImageData(0, 0, 24, 24).data; } catch { resolve(null); return; }
         const buckets = new Map();
         for (let i = 0; i < d.length; i += 4) {
           const r = d[i], g = d[i + 1], b = d[i + 2];
@@ -149,6 +157,7 @@ window.Viz = (() => {
         resolve(top.length ? top : null);
       };
       img.onerror = () => resolve(null);
+      img.crossOrigin = 'anonymous';
       img.src = src;
     });
   }

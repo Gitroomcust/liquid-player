@@ -1,10 +1,11 @@
 {
   "name": "liquid-player",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Liquid glass music player",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/system-media.js && node --check src/renderer/app.js && node --check src/renderer/viz.js",
     "dist:win": "electron-builder --win",
     "dist:mac": "electron-builder --mac",
     "dist:linux": "electron-builder --linux",
@@ -12,8 +13,8 @@
   },
   "license": "MIT",
   "devDependencies": {
-    "electron": "^33.0.0",
-    "electron-builder": "^25.1.8"
+    "electron": "^42.11.14",
+    "electron-builder": "^26.15.3"
   },
   "dependencies": {
     "music-metadata": "^7.14.0"
@@ -69,10 +70,25 @@
             "x64",
             "arm64"
           ]
+        },
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         }
       ],
       "category": "public.app-category.music",
-      "identity": null
+      "artifactName": "liquid-player-${version}-mac-${arch}.${ext}",
+      "hardenedRuntime": false,
+      "extendInfo": {
+        "NSAudioCaptureUsageDescription": "Liquid Player анализирует системный звук, чтобы визуализатор реагировал на любую музыку на компьютере."
+      },
+      "identity": "-"
+    },
+    "dmg": {
+      "artifactName": "liquid-player-${version}-mac-${arch}.${ext}"
     },
     "linux": {
       "target": [

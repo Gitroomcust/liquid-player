@@ -1,24 +1,31 @@
-const $ = (s) => document.querySelector(s);
+const $ = (selector) => document.querySelector(selector);
 const screens = { home: $('#screen-home'), list: $('#screen-list'), player: $('#screen-player') };
 const audio = $('#audio');
 const listEl = $('#track-list');
 const bgCover = $('#bg-cover');
 
 const state = {
-  platform: '',
-  source: null,                 // 'local' | 'system'
-  local: { dir: '', tracks: [] },
+  source: null,
+  local: { dir: '', gen: 0, tracks: [] },
   sessions: [],
-  current: null,                // { kind: 'local', index } | { kind: 'system', id }
+  current: null,
   sys: { position: 0, duration: 0, status: 'Stopped', at: 0 },
   screen: 'home',
 };
 
-let actx = null, localAnalyser = null, sysAnalyser = null, loopback = null;
+let actx = null;
+let localAnalyser = null;
+let sysAnalyser = null;
+let systemStream = null;
+let systemSource = null;
+let systemGain = null;
+let captureStartPromise = null;
+let runtimePlatform = '';
+let systemListSignature = '';
+let currentCover = null;
 
 const fmtTime = (s) => { s = Math.max(0, Math.floor(s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : '');
-const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 function greeting() {
   const h = new Date().getHours();
@@ -40,9 +47,15 @@ function appName(id = '') {
   return id.replace(/\.exe$/i, '').split('!')[0].split('_')[0] || 'Приложение';
 }
 
+const plural = (n, one, few, many) => {
+  const m = n % 10, h = n % 100;
+  return m === 1 && h !== 11 ? one : m >= 2 && m <= 4 && (h < 10 || h >= 20) ? few : many;
+};
+
 function showScreen(name) {
   state.screen = name;
-  for (const k in screens) screens[k].classList.toggle('active', k === name);
+  if (name === 'list' && state.source === 'system') renderList();
+  for (const key in screens) screens[key].classList.toggle('active', key === name);
   updateMini();
 }
 
@@ -51,78 +64,315 @@ function ensureCtx() {
   if (!actx) {
     actx = new (window.AudioContext || window.webkitAudioContext)();
     localAnalyser = actx.createAnalyser();
-    localAnalyser.fftSize = 512; localAnalyser.smoothingTimeConstant = 0.82;
-    const src = actx.createMediaElementSource(audio);
-    src.connect(localAnalyser); localAnalyser.connect(actx.destination);
+    localAnalyser.fftSize = 512;
+    localAnalyser.smoothingTimeConstant = 0.82;
+    const source = actx.createMediaElementSource(audio);
+    source.connect(localAnalyser);
+    localAnalyser.connect(actx.destination);
   }
   if (actx.state === 'suspended') actx.resume();
 }
 
-async function startLoopback() {
-  if (sysAnalyser) return true;
+function captureActive() {
+  return !!systemStream && systemStream.getAudioTracks().some((track) => track.readyState === 'live');
+}
+
+function updateVisualizerSource() {
+  const localPlaying = state.current?.kind === 'local' && !audio.paused;
+  const hasSystemSession = state.sessions.some((item) => item.status === 'Playing');
+  if (localPlaying) {
+    Viz.setAnalyser(localAnalyser);
+    Viz.setSynth(false);
+  } else if (captureActive()) {
+    Viz.setAnalyser(sysAnalyser);
+    Viz.setSynth(false);
+  } else if (hasSystemSession) {
+    Viz.setAnalyser(null);
+    Viz.setSynth(true);
+  } else {
+    Viz.setAnalyser(null);
+    Viz.setSynth(false);
+  }
+  Viz.setActive(localPlaying || captureActive() || hasSystemSession);
+}
+
+function refreshSystemSummary() {
+  const count = state.sessions.length;
+  const listening = captureActive();
+  $('#sys-sub').textContent = `${count} ${plural(count, 'трек', 'трека', 'треков')} · звук ПК: ${listening ? 'слушаю' : 'недоступен'}`;
+  $('.live-dot').classList.toggle('off', !listening);
+}
+
+function onSystemAudioEnded(stream) {
+  if (systemStream !== stream) return;
+  systemStream = null;
+  systemSource?.disconnect();
+  systemGain?.disconnect();
+  systemSource = null;
+  systemGain = null;
+  if (state.current?.kind === 'capture') setPlayingUI(false);
+  refreshSystemSummary();
+  updateVisualizerSource();
+  if (state.source === 'system' && state.screen === 'list') renderList();
+}
+
+function attachSystemAudio(stream) {
+  ensureCtx();
+  const source = actx.createMediaStreamSource(stream);
+  const analyser = actx.createAnalyser();
+  analyser.fftSize = 512;
+  analyser.smoothingTimeConstant = 0.82;
+  const gain = actx.createGain();
+  gain.gain.value = 0;
+  source.connect(analyser);
+  analyser.connect(gain);
+  gain.connect(actx.destination);
+  systemStream = stream;
+  systemSource = source;
+  sysAnalyser = analyser;
+  systemGain = gain;
+  stream.getAudioTracks().forEach((track) => track.addEventListener('ended', () => onSystemAudioEnded(stream), { once: true }));
+  refreshSystemSummary();
+  updateVisualizerSource();
+  if (state.source === 'system' && state.screen === 'list') renderList();
+}
+
+async function audioInputDevices() {
+  let devices = await navigator.mediaDevices.enumerateDevices();
+  if (!devices.some((device) => device.kind === 'audioinput' && device.label)) {
+    const permissionStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    permissionStream.getTracks().forEach((track) => track.stop());
+    devices = await navigator.mediaDevices.enumerateDevices();
+  }
+  return devices.filter((device) => device.kind === 'audioinput');
+}
+
+async function openInputDevice(device) {
+  return navigator.mediaDevices.getUserMedia({
+    audio: {
+      deviceId: { exact: device.deviceId },
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+    },
+  });
+}
+
+async function openDisplayAudio() {
+  const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+  stream.getVideoTracks().forEach((track) => track.stop());
+  if (!stream.getAudioTracks().length) {
+    stream.getTracks().forEach((track) => track.stop());
+    return null;
+  }
+  return stream;
+}
+
+async function acquireSystemAudio() {
+  if (!navigator.mediaDevices) return null;
+  if (runtimePlatform === 'linux' || runtimePlatform === 'darwin') {
+    try {
+      const inputs = await audioInputDevices();
+      const pattern = runtimePlatform === 'linux'
+        ? /monitor/i
+        : /blackhole|soundflower|loopback|vb-?cable/i;
+      const device = inputs.find((item) => pattern.test(item.label));
+      if (device) {
+        try { return await openInputDevice(device); } catch {}
+      }
+    } catch {}
+  }
+  try { return await openDisplayAudio(); } catch { return null; }
+}
+
+async function startSystemAudio() {
+  if (captureActive()) return systemStream;
+  if (captureStartPromise) return captureStartPromise;
+  captureStartPromise = (async () => {
+    const stream = await acquireSystemAudio();
+    if (!stream) return null;
+    try {
+      attachSystemAudio(stream);
+      return stream;
+    } catch {
+      stream.getTracks().forEach((track) => track.stop());
+      return null;
+    }
+  })();
   try {
-    const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
-    stream.getVideoTracks().forEach((t) => t.stop());
-    if (!stream.getAudioTracks().length) throw new Error('no audio');
-    ensureCtx();
-    const src = actx.createMediaStreamSource(stream);
-    sysAnalyser = actx.createAnalyser();
-    sysAnalyser.fftSize = 512; sysAnalyser.smoothingTimeConstant = 0.82;
-    src.connect(sysAnalyser);
-    loopback = stream;
-    return true;
-  } catch { return false; }
+    return await captureStartPromise;
+  } catch {
+    return null;
+  } finally {
+    captureStartPromise = null;
+    refreshSystemSummary();
+    updateVisualizerSource();
+  }
+}
+
+function stopSystemAudio() {
+  const stream = systemStream;
+  if (!stream) return;
+  systemStream = null;
+  systemSource?.disconnect();
+  systemGain?.disconnect();
+  systemSource = null;
+  systemGain = null;
+  stream.getTracks().forEach((track) => track.stop());
+  if (state.current?.kind === 'capture') setPlayingUI(false);
+  refreshSystemSummary();
+  updateVisualizerSource();
+  if (state.source === 'system' && state.screen === 'list') renderList();
 }
 
 /* ---------- List rendering ---------- */
 function renderList() {
-  listEl.innerHTML = '';
   const isLocal = state.source === 'local';
   $('#change-folder').style.display = isLocal ? '' : 'none';
   if (isLocal) {
+    systemListSignature = '';
     $('#list-title').textContent = 'Локальная папка';
     $('#list-sub').textContent = state.local.dir ? `${state.local.tracks.length} треков · ${state.local.dir}` : '';
-    if (!state.local.tracks.length) { listEl.innerHTML = `<div class="empty"><b>Пусто</b>В этой папке не нашлось аудиофайлов</div>`; return; }
-    state.local.tracks.forEach((t, i) => listEl.appendChild(trackRow({
-      cover: t.cover, title: t.title, sub: [t.artist, t.album].filter(Boolean).join(' — '), right: t.duration ? fmtTime(t.duration) : '',
-      current: state.current?.kind === 'local' && state.current.index === i, onClick: () => playLocal(i, true), delay: i,
-    })));
-  } else {
-    $('#list-title').textContent = 'Другие приложения';
-    $('#list-sub').textContent = 'Поиск идёт постоянно — список обновляется сам';
-    if (!state.sessions.length) {
-      listEl.innerHTML = `<div class="empty"><b>Пока ничего не играет</b>Включите музыку в любом приложении — Spotify, браузере, Яндекс Музыке… Трек появится здесь автоматически.</div>`;
-      return;
+    const fragment = document.createDocumentFragment();
+    if (!state.local.tracks.length) {
+      fragment.appendChild(emptyMessage('Пусто', 'В этой папке не нашлось аудиофайлов'));
+    } else {
+      state.local.tracks.forEach((track, index) => fragment.appendChild(trackRow({
+        cover: track.hasCover ? window.api.toCoverUrl(track.path) : null,
+        title: track.title,
+        sub: [track.artist, track.album].filter(Boolean).join(' — '),
+        right: track.duration ? fmtTime(track.duration) : '',
+        current: state.current?.kind === 'local' && state.current.index === index,
+        onClick: () => playLocal(index, true),
+        delay: index,
+        index,
+      })));
     }
-    state.sessions.forEach((s, i) => listEl.appendChild(trackRow({
-      cover: s.thumb, title: s.title || 'Без названия', sub: [s.artist, appName(s.id)].filter(Boolean).join(' · '),
-      badge: s.status === 'Playing' ? 'Играет' : s.status === 'Paused' ? 'Пауза' : 'Стоп', playing: s.status === 'Playing',
-      current: state.current?.kind === 'system' && state.current.id === s.id, onClick: () => selectSystem(s.id), delay: i,
+    listEl.replaceChildren(fragment);
+    return;
+  }
+
+  $('#list-title').textContent = 'Другие приложения';
+  $('#list-sub').textContent = 'Поиск идёт постоянно — список обновляется сам';
+  const signature = JSON.stringify({
+    capture: captureActive(),
+    sessions: state.sessions.map((item) => [item.id, item.title, item.artist, item.status, item.thumb?.length || 0]),
+  });
+  if (signature === systemListSignature) {
+    listEl.querySelectorAll('.track').forEach((row) => {
+      const current = row.classList.contains('capture-row')
+        ? state.current?.kind === 'capture'
+        : state.current?.kind === 'system' && state.current.id === row.dataset.sessionId;
+      row.classList.toggle('current', current);
+    });
+    return;
+  }
+  systemListSignature = signature;
+  const fragment = document.createDocumentFragment();
+  fragment.appendChild(trackRow({
+    title: 'Весь звук компьютера',
+    sub: 'Любой звук, который играет на ПК',
+    badge: captureActive() ? 'Слушаю' : 'Недоступно',
+    playing: captureActive(),
+    current: state.current?.kind === 'capture',
+    capture: true,
+    onClick: selectCapture,
+    delay: 0,
+  }));
+  if (!state.sessions.length) {
+    fragment.appendChild(emptyMessage('Пока ничего не играет', 'Включите музыку в любом приложении — Spotify, браузере, Яндекс Музыке… Трек появится здесь автоматически.'));
+  } else {
+    state.sessions.forEach((item, index) => fragment.appendChild(trackRow({
+      cover: item.thumb,
+      title: item.title || 'Без названия',
+      sub: [item.artist, appName(item.id)].filter(Boolean).join(' · '),
+      badge: item.status === 'Playing' ? 'Играет' : item.status === 'Paused' ? 'Пауза' : 'Стоп',
+      playing: item.status === 'Playing',
+      current: state.current?.kind === 'system' && state.current.id === item.id,
+      onClick: () => selectSystem(item.id),
+      delay: index + 1,
+      sessionId: item.id,
     })));
   }
+  listEl.replaceChildren(fragment);
 }
 
-function trackRow({ cover, title, sub, right, badge, playing, current, onClick, delay }) {
-  const b = document.createElement('button');
-  b.className = 'track' + (current ? ' current' : '');
-  b.style.animationDelay = `${Math.min(delay, 12) * 40}ms`;
-  b.innerHTML = `
-    <span class="thumb">${cover ? `<img src="${cover}" alt="">` : `<svg viewBox="0 0 24 24"><path d="M9 18V6l12-2v12"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>`}</span>
-    <span class="t-text"><span class="t-title">${esc(title)}</span><span class="t-sub">${esc(sub)}</span></span>
-    <span class="t-right">${badge ? `<span class="badge${playing ? ' playing' : ''}">${badge}</span>` : ''}${right ? `<span>${right}</span>` : ''}</span>`;
-  b.addEventListener('click', onClick);
-  return b;
+function emptyMessage(title, text) {
+  const message = document.createElement('div');
+  message.className = 'empty';
+  const heading = document.createElement('b');
+  heading.textContent = title;
+  message.append(heading, document.createTextNode(text));
+  return message;
+}
+
+function trackRow({ cover, title, sub, right, badge, playing, current, onClick, delay, index, capture, sessionId }) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = `track${current ? ' current' : ''}${capture ? ' capture-row' : ''}`;
+  if (index !== undefined) button.dataset.index = String(index);
+  if (sessionId !== undefined) button.dataset.sessionId = sessionId;
+  if (delay < 15) button.style.animationDelay = `${delay * 40}ms`;
+  else button.style.animation = 'none';
+
+  const thumb = document.createElement('span');
+  thumb.className = 'thumb';
+  if (cover) {
+    const image = document.createElement('img');
+    image.alt = '';
+    image.loading = 'lazy';
+    image.decoding = 'async';
+    image.src = cover;
+    thumb.appendChild(image);
+  } else {
+    thumb.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 18V6l12-2v12"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
+  }
+
+  const text = document.createElement('span');
+  text.className = 't-text';
+  const heading = document.createElement('span');
+  heading.className = 't-title';
+  heading.textContent = title || '';
+  const detail = document.createElement('span');
+  detail.className = 't-sub';
+  detail.textContent = sub || '';
+  text.append(heading, detail);
+
+  const rightSide = document.createElement('span');
+  rightSide.className = 't-right';
+  if (badge) {
+    const label = document.createElement('span');
+    label.className = `badge${playing ? ' playing' : ''}`;
+    label.textContent = badge;
+    rightSide.appendChild(label);
+  }
+  if (right) {
+    const duration = document.createElement('span');
+    duration.className = 'duration';
+    duration.textContent = right;
+    rightSide.appendChild(duration);
+  }
+  button.append(thumb, text, rightSide);
+  button.addEventListener('click', onClick);
+  return button;
 }
 
 /* ---------- Now playing ---------- */
 function setCover(src) {
-  const img = $('#cover'), fb = $('#cover-fallback');
+  const image = $('#cover');
+  const fallback = $('#cover-fallback');
+  currentCover = src || null;
   if (src) {
-    img.src = src; img.classList.remove('hidden'); fb.classList.add('hidden');
-    bgCover.style.backgroundImage = `url("${src}")`; bgCover.classList.add('on');
-    Viz.paletteFromImage(src).then((p) => (p ? Viz.setPalette(p) : Viz.resetPalette()));
+    image.src = src;
+    image.classList.remove('hidden');
+    fallback.classList.add('hidden');
+    bgCover.style.backgroundImage = `url("${src.replace(/["\\\n\r]/g, '\\$&')}")`;
+    bgCover.classList.add('on');
+    Viz.paletteFromImage(src).then((colors) => (colors ? Viz.setPalette(colors) : Viz.resetPalette()));
   } else {
-    img.removeAttribute('src'); img.classList.add('hidden'); fb.classList.remove('hidden');
+    image.removeAttribute('src');
+    image.classList.add('hidden');
+    fallback.classList.remove('hidden');
     bgCover.classList.remove('on');
     Viz.resetPalette();
   }
@@ -134,23 +384,35 @@ function setMeta({ title, artist, source }) {
   $('#np-source').textContent = source || '';
   $('#mini-title').textContent = title || 'Без названия';
   $('#mini-artist').textContent = artist || '';
-  const mc = $('#mini-cover'), c = $('#cover');
-  if (c.getAttribute('src')) mc.src = c.src; else mc.removeAttribute('src');
+  const miniCover = $('#mini-cover');
+  if (currentCover) miniCover.src = currentCover;
+  else miniCover.removeAttribute('src');
+}
+
+function configurePlayerControls() {
+  const capture = state.current?.kind === 'capture';
+  $('.seek').hidden = capture;
+  $('#seek').disabled = state.current?.kind !== 'local';
+  $('#btn-prev').disabled = capture;
+  $('#btn-next').disabled = capture;
 }
 
 function openPlayer(track, withTransition) {
   const parts = [$('.cover-wrap'), $('.np-meta'), $('.controls-card')];
-  parts.forEach((p) => p.classList.remove('in'));
+  parts.forEach((part) => part.classList.remove('in'));
   setCover(track.cover);
   setMeta(track);
-  Viz.setActive(true);
-  const reveal = () => { void parts[0].offsetWidth; parts.forEach((p) => p.classList.add('in')); };
+  configurePlayerControls();
+  const reveal = () => { void parts[0].offsetWidth; parts.forEach((part) => part.classList.add('in')); };
   if (withTransition) {
     listEl.classList.add('dissolve');
     Viz.burst();
     setTimeout(() => { showScreen('player'); listEl.classList.remove('dissolve'); }, 520);
     setTimeout(reveal, 700);
-  } else { showScreen('player'); requestAnimationFrame(reveal); }
+  } else {
+    showScreen('player');
+    requestAnimationFrame(reveal);
+  }
 }
 
 function setPlayingUI(playing) {
@@ -158,133 +420,270 @@ function setPlayingUI(playing) {
   $('#mini-play').classList.toggle('playing', playing);
 }
 
-function setSeek(pos, dur) {
-  const r = $('#seek');
-  const p = dur > 0 ? Math.min(1, pos / dur) : 0;
-  if (!r.matches(':active')) r.value = Math.round(p * 1000);
-  r.style.backgroundSize = `${p * 100}% 100%`;
-  $('#t-cur').textContent = fmtTime(pos); $('#t-dur').textContent = fmtTime(dur);
+function setSeek(position, duration) {
+  const range = $('#seek');
+  const progress = duration > 0 ? Math.min(1, position / duration) : 0;
+  if (!range.matches(':active')) range.value = Math.round(progress * 1000);
+  range.style.backgroundSize = `${progress * 100}% 100%`;
+  $('#t-cur').textContent = fmtTime(position);
+  $('#t-dur').textContent = fmtTime(duration);
 }
 
 function updateMini() {
-  const on = !!state.current && state.screen !== 'player';
-  $('#mini').classList.toggle('on', on);
-  document.body.classList.toggle('has-mini', on);
+  const visible = !!state.current && state.screen !== 'player';
+  $('#mini').classList.toggle('on', visible);
+  document.body.classList.toggle('has-mini', visible);
 }
 
 /* ---------- Local source ---------- */
+function localFolderName() {
+  return state.local.dir.replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+}
+
+function updateLocalSummary() {
+  const count = state.local.tracks.length;
+  $('#local-sub').textContent = state.local.dir
+    ? `${localFolderName()} · ${count} ${plural(count, 'трек', 'трека', 'треков')}`
+    : 'Выбрать папку с музыкой на компьютере';
+  if (state.source === 'local') $('#list-sub').textContent = `${count} треков · ${state.local.dir}`;
+}
+
 async function chooseFolder() {
-  const res = await window.api.pickFolder();
-  if (!res) return;
-  state.local = res; state.source = 'local';
-  renderList(); showScreen('list');
+  const result = await window.api.pickFolder();
+  if (!result) return;
+  state.local = result;
+  state.source = 'local';
+  updateLocalSummary();
+  renderList();
+  showScreen('list');
 }
 
-function playLocal(i, withTransition) {
-  const t = state.local.tracks[i];
-  if (!t) return;
+function localCover(track) {
+  return track.hasCover ? window.api.toCoverUrl(track.path) : null;
+}
+
+function playLocal(index, withTransition) {
+  const track = state.local.tracks[index];
+  if (!track) return;
   ensureCtx();
-  state.current = { kind: 'local', index: i };
-  audio.src = window.api.toMediaUrl(t.path);
+  state.current = { kind: 'local', index };
+  audio.src = window.api.toMediaUrl(track.path);
   audio.play().catch(() => {});
-  Viz.setAnalyser(localAnalyser); Viz.setSynth(false);
-  $('#seek').disabled = false;
-  openPlayer({ cover: t.cover, title: t.title, artist: [t.artist, t.album].filter(Boolean).join(' — '), source: 'Локальная папка' }, withTransition);
-  listEl.querySelectorAll('.track').forEach((el, k) => el.classList.toggle('current', k === i));
+  openPlayer({
+    cover: localCover(track),
+    title: track.title,
+    artist: [track.artist, track.album].filter(Boolean).join(' — '),
+    source: 'Локальная папка',
+  }, withTransition);
+  updateVisualizerSource();
+  listEl.querySelectorAll('.track[data-index]').forEach((element) => {
+    element.classList.toggle('current', Number(element.dataset.index) === index);
+  });
 }
 
-const localDuration = () => (isFinite(audio.duration) && audio.duration > 0 ? audio.duration : (state.local.tracks[state.current?.index]?.duration || 0));
-audio.addEventListener('timeupdate', () => { if (state.current?.kind === 'local') setSeek(audio.currentTime, localDuration()); });
-audio.addEventListener('play', () => { if (state.current?.kind === 'local') setPlayingUI(true); });
-audio.addEventListener('pause', () => { if (state.current?.kind === 'local') setPlayingUI(false); });
+function applyTrackMetadata({ gen, updates }) {
+  if (gen !== state.local.gen) return;
+  for (const update of updates) {
+    const track = state.local.tracks[update.index];
+    if (!track) continue;
+    Object.assign(track, update);
+    const row = listEl.querySelector(`.track[data-index="${update.index}"]`);
+    if (row) {
+      row.querySelector('.t-title').textContent = track.title;
+      row.querySelector('.t-sub').textContent = [track.artist, track.album].filter(Boolean).join(' — ');
+      const duration = row.querySelector('.duration');
+      if (duration) duration.textContent = track.duration ? fmtTime(track.duration) : '';
+      else if (track.duration) {
+        const label = document.createElement('span');
+        label.className = 'duration';
+        label.textContent = fmtTime(track.duration);
+        row.querySelector('.t-right').appendChild(label);
+      }
+      if (track.hasCover && !row.querySelector('.thumb img')) {
+        const image = document.createElement('img');
+        image.alt = '';
+        image.loading = 'lazy';
+        image.decoding = 'async';
+        image.src = localCover(track);
+        row.querySelector('.thumb').replaceChildren(image);
+      }
+    }
+    if (state.current?.kind === 'local' && state.current.index === update.index) {
+      const cover = localCover(track);
+      if (cover && cover !== currentCover) setCover(cover);
+      setMeta({
+        title: track.title,
+        artist: [track.artist, track.album].filter(Boolean).join(' — '),
+        source: 'Локальная папка',
+      });
+    }
+  }
+  updateLocalSummary();
+}
+
+const localDuration = () => (
+  Number.isFinite(audio.duration) && audio.duration > 0
+    ? audio.duration
+    : (state.local.tracks[state.current?.index]?.duration || 0)
+);
+audio.addEventListener('timeupdate', () => {
+  if (state.current?.kind === 'local') setSeek(audio.currentTime, localDuration());
+});
+audio.addEventListener('play', () => {
+  if (state.current?.kind === 'local') setPlayingUI(true);
+  updateVisualizerSource();
+});
+audio.addEventListener('pause', () => {
+  if (state.current?.kind === 'local') setPlayingUI(false);
+  updateVisualizerSource();
+});
 audio.addEventListener('ended', () => step(1));
 
 /* ---------- System source ---------- */
-function sessionById(id) { return state.sessions.find((s) => s.id === id); }
+function sessionById(id) { return state.sessions.find((item) => item.id === id); }
+
+async function selectCapture() {
+  audio.pause();
+  state.current = { kind: 'capture' };
+  openPlayer({ cover: null, title: 'Весь звук компьютера', artist: '', source: 'Системный звук' }, true);
+  const stream = captureActive() ? systemStream : await startSystemAudio();
+  setPlayingUI(!!stream);
+  updateVisualizerSource();
+}
 
 async function selectSystem(id) {
-  const s = sessionById(id);
-  if (!s) return;
+  const item = sessionById(id);
+  if (!item) return;
   audio.pause();
   state.current = { kind: 'system', id };
-  state.sys = { position: s.position, duration: s.duration, status: s.status, at: performance.now() };
-  $('#seek').disabled = true;
-  openPlayer({ cover: s.thumb, title: s.title, artist: s.artist, source: appName(s.id) }, true);
-  setPlayingUI(s.status === 'Playing');
-  setSeek(s.position, s.duration);
-  const ok = await startLoopback();
-  if (state.current?.kind !== 'system') return;
-  if (ok) { Viz.setAnalyser(sysAnalyser); Viz.setSynth(false); }
-  else { Viz.setAnalyser(null); Viz.setSynth(s.status === 'Playing'); }
+  state.sys = { position: item.position, duration: item.duration, status: item.status, at: performance.now() };
+  openPlayer({ cover: item.thumb, title: item.title, artist: item.artist, source: appName(item.id) }, true);
+  setPlayingUI(item.status === 'Playing');
+  setSeek(item.position, item.duration);
+  updateVisualizerSource();
 }
 
 function applySessions(sessions) {
   state.sessions = sessions;
-  const playing = sessions.filter((s) => s.status === 'Playing').length;
-  $('#sys-sub').textContent = sessions.length
-    ? `${sessions.length} ${plural(sessions.length, 'трек', 'трека', 'треков')}, играет: ${playing}`
-    : 'Ищем активные треки…';
+  refreshSystemSummary();
   if (state.source === 'system' && state.screen === 'list') renderList();
   if (state.current?.kind === 'system') {
-    const s = sessionById(state.current.id);
-    if (!s) { setMeta({ title: 'Воспроизведение завершено', artist: '', source: appName(state.current.id) }); setPlayingUI(false); Viz.setSynth(false); return; }
-    const prevTitle = $('#np-title').textContent;
-    if (s.title !== prevTitle) { setCover(s.thumb); }
-    else if (s.thumb && $('#cover').src !== s.thumb) setCover(s.thumb);
-    setMeta({ title: s.title, artist: s.artist, source: appName(s.id) });
-    const est = state.sys.status === 'Playing' ? state.sys.position + (performance.now() - state.sys.at) / 1000 : state.sys.position;
-    const reanchor = s.status !== state.sys.status || s.title !== prevTitle || Math.abs(s.position - est) > 2.5 || s.duration !== state.sys.duration;
-    if (reanchor) state.sys = { position: s.position, duration: s.duration, status: s.status, at: performance.now() };
-    setPlayingUI(s.status === 'Playing');
-    if (!sysAnalyser) Viz.setSynth(s.status === 'Playing');
+    const item = sessionById(state.current.id);
+    if (!item) {
+      setMeta({ title: 'Воспроизведение завершено', artist: '', source: appName(state.current.id) });
+      setPlayingUI(false);
+      updateVisualizerSource();
+      return;
+    }
+    const previousTitle = $('#np-title').textContent;
+    if (item.title !== previousTitle || (item.thumb && item.thumb !== currentCover)) setCover(item.thumb);
+    setMeta({ title: item.title, artist: item.artist, source: appName(item.id) });
+    const estimate = state.sys.status === 'Playing'
+      ? state.sys.position + (performance.now() - state.sys.at) / 1000
+      : state.sys.position;
+    const reanchor = item.status !== state.sys.status
+      || item.title !== previousTitle
+      || Math.abs(item.position - estimate) > 2
+      || item.duration !== state.sys.duration;
+    if (reanchor) state.sys = { position: item.position, duration: item.duration, status: item.status, at: performance.now() };
+    setPlayingUI(item.status === 'Playing');
   }
+  updateVisualizerSource();
 }
-const plural = (n, a, b, c) => { const m = n % 10, h = n % 100; return m === 1 && h !== 11 ? a : m >= 2 && m <= 4 && (h < 10 || h >= 20) ? b : c; };
 
 setInterval(() => {
+  if (state.screen !== 'player' && !$('#mini').classList.contains('on')) return;
+  if (state.current?.kind === 'local') {
+    setSeek(audio.currentTime, localDuration());
+    return;
+  }
   if (state.current?.kind !== 'system') return;
   const { position, duration, status, at } = state.sys;
-  const pos = status === 'Playing' ? position + (performance.now() - at) / 1000 : position;
-  setSeek(Math.min(pos, duration || pos), duration);
+  const estimate = status === 'Playing' ? position + (performance.now() - at) / 1000 : position;
+  setSeek(Math.min(estimate, duration || estimate), duration);
 }, 250);
 
 /* ---------- Controls ---------- */
 function togglePlay() {
   if (!state.current) return;
-  if (state.current.kind === 'local') { ensureCtx(); audio.paused ? audio.play() : audio.pause(); }
-  else window.api.systemControl(state.current.id, 'toggle');
-}
-function step(dir) {
-  if (!state.current) return;
   if (state.current.kind === 'local') {
-    const n = state.local.tracks.length;
-    if (n) playLocal((state.current.index + dir + n) % n, false);
-  } else window.api.systemControl(state.current.id, dir > 0 ? 'next' : 'prev');
+    ensureCtx();
+    audio.paused ? audio.play() : audio.pause();
+  } else if (state.current.kind === 'capture') {
+    if (captureActive()) stopSystemAudio();
+    else {
+      startSystemAudio().then((stream) => {
+        setPlayingUI(!!stream);
+        updateVisualizerSource();
+      });
+    }
+  } else {
+    window.api.systemControl(state.current.id, 'toggle');
+  }
 }
+
+function step(direction) {
+  if (!state.current || state.current.kind === 'capture') return;
+  if (state.current.kind === 'local') {
+    const count = state.local.tracks.length;
+    if (count) playLocal((state.current.index + direction + count) % count, false);
+  } else {
+    window.api.systemControl(state.current.id, direction > 0 ? 'next' : 'prev');
+  }
+}
+
 $('#btn-play').addEventListener('click', togglePlay);
-$('#mini-play').addEventListener('click', (e) => { e.stopPropagation(); togglePlay(); });
+$('#mini-play').addEventListener('click', (event) => { event.stopPropagation(); togglePlay(); });
 $('#btn-prev').addEventListener('click', () => step(-1));
 $('#btn-next').addEventListener('click', () => step(1));
-$('#seek').addEventListener('input', (e) => { if (state.current?.kind === 'local' && localDuration()) audio.currentTime = (e.target.value / 1000) * localDuration(); });
+$('#seek').addEventListener('input', (event) => {
+  if (state.current?.kind === 'local' && localDuration()) audio.currentTime = (event.target.value / 1000) * localDuration();
+});
 $('#mini').addEventListener('click', () => openPlayer(currentTrackInfo(), false));
 $('#change-folder').addEventListener('click', chooseFolder);
-document.querySelectorAll('[data-go]').forEach((b) => b.addEventListener('click', () => showScreen(b.dataset.go)));
-document.querySelectorAll('.source').forEach((b) => b.addEventListener('click', () => {
-  if (b.dataset.source === 'local') { if (state.local.tracks.length) { state.source = 'local'; renderList(); showScreen('list'); } else chooseFolder(); }
-  else { state.source = 'system'; renderList(); showScreen('list'); }
+document.querySelectorAll('[data-go]').forEach((button) => button.addEventListener('click', () => showScreen(button.dataset.go)));
+document.querySelectorAll('.source').forEach((button) => button.addEventListener('click', () => {
+  if (button.dataset.source === 'local') {
+    if (state.local.tracks.length) {
+      state.source = 'local';
+      renderList();
+      showScreen('list');
+    } else chooseFolder();
+  } else {
+    state.source = 'system';
+    systemListSignature = '';
+    renderList();
+    showScreen('list');
+    if (runtimePlatform === 'darwin') void startSystemAudio();
+  }
 }));
 
 function currentTrackInfo() {
-  if (state.current?.kind === 'local') { const t = state.local.tracks[state.current.index]; return { cover: t.cover, title: t.title, artist: [t.artist, t.album].filter(Boolean).join(' — '), source: 'Локальная папка' }; }
-  const s = sessionById(state.current.id) || {};
-  return { cover: s.thumb, title: s.title || $('#np-title').textContent, artist: s.artist || '', source: appName(state.current.id) };
+  if (state.current?.kind === 'capture') {
+    return { cover: null, title: 'Весь звук компьютера', artist: '', source: 'Системный звук' };
+  }
+  if (state.current?.kind === 'local') {
+    const track = state.local.tracks[state.current.index];
+    return {
+      cover: localCover(track),
+      title: track.title,
+      artist: [track.artist, track.album].filter(Boolean).join(' — '),
+      source: 'Локальная папка',
+    };
+  }
+  const item = sessionById(state.current.id) || {};
+  return { cover: item.thumb, title: item.title || $('#np-title').textContent, artist: item.artist || '', source: appName(state.current.id) };
 }
 
 /* ---------- Init ---------- */
+window.api.onSystemSessions(applySessions);
+window.api.onTracksMeta(applyTrackMetadata);
+
 (async () => {
   const { name, platform } = await window.api.getUser();
-  state.platform = platform;
+  runtimePlatform = platform;
   $('#greet').textContent = `${greeting()}, ${cap(name) || 'друг'}`;
   $('#greet-date').textContent = new Date().toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
-  window.api.onSystemSessions(applySessions);
+  refreshSystemSummary();
+  if (platform === 'win32' || platform === 'linux') void startSystemAudio();
 })();
