@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob: file: media:; media-src 'self' media: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <title>Liquid Player</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <canvas id="viz"></canvas>
+  <div id="bg-cover"></div>
+  <div class="drag-bar"></div>
+
+  <main>
+    <!-- Home -->
+    <section id="screen-home" class="screen active">
+      <div class="greeting">
+        <p class="eyebrow" id="greet-date"></p>
+        <h1 id="greet"></h1>
+        <p class="sub">Откуда будем слушать музыку?</p>
+      </div>
+      <div class="sources">
+        <button class="glass card source" data-source="local">
+          <span class="icon">
+            <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          </span>
+          <span class="card-title">Локальная папка</span>
+          <span class="card-sub" id="local-sub">Выбрать папку с музыкой на компьютере</span>
+          <span class="chev">›</span>
+        </button>
+        <button class="glass card source" data-source="system">
+          <span class="icon">
+            <svg viewBox="0 0 24 24"><path d="M9 18V6l12-2v12"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+          </span>
+          <span class="card-title">Другие приложения</span>
+          <span class="card-sub"><span class="live-dot"></span><span id="sys-sub">Ищем активные треки…</span></span>
+          <span class="chev">›</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- Track list -->
+    <section id="screen-list" class="screen">
+      <header class="glass bar">
+        <button class="icon-btn back" data-go="home" title="Назад">‹</button>
+        <div class="bar-text">
+          <h2 id="list-title">Треки</h2>
+          <p id="list-sub"></p>
+        </div>
+        <button class="icon-btn" id="change-folder" title="Выбрать другую папку">
+          <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        </button>
+      </header>
+      <div id="track-list" class="glass panel list"></div>
+    </section>
+
+    <!-- Now playing -->
+    <section id="screen-player" class="screen">
+      <button class="icon-btn back floating" data-go="list" title="Назад">‹</button>
+      <div class="player">
+        <div class="cover-wrap">
+          <img id="cover" alt="" />
+          <div id="cover-fallback" class="cover-fallback">
+            <svg viewBox="0 0 24 24"><path d="M9 18V6l12-2v12"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+          </div>
+        </div>
+        <div class="np-meta">
+          <h2 id="np-title"></h2>
+          <p id="np-artist"></p>
+          <p id="np-source" class="np-source"></p>
+        </div>
+        <div class="glass controls-card">
+          <div class="seek">
+            <span id="t-cur">0:00</span>
+            <input type="range" id="seek" min="0" max="1000" value="0" />
+            <span id="t-dur">0:00</span>
+          </div>
+          <div class="controls">
+            <button class="ctl" id="btn-prev" title="Предыдущий">
+              <svg viewBox="0 0 24 24"><path d="M6 5v14M20 6l-10 6 10 6z"/></svg>
+            </button>
+            <button class="ctl big" id="btn-play" title="Воспроизвести / Пауза">
+              <svg class="ic-play" viewBox="0 0 24 24"><path d="M7 4l14 8-14 8z"/></svg>
+              <svg class="ic-pause" viewBox="0 0 24 24"><path d="M7 4h4v16H7zM13 4h4v16h-4z"/></svg>
+            </button>
+            <button class="ctl" id="btn-next" title="Следующий">
+              <svg viewBox="0 0 24 24"><path d="M18 5v14M4 6l10 6-10 6z"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Mini player -->
+  <div id="mini" class="glass mini">
+    <img id="mini-cover" alt="" />
+    <div class="mini-text">
+      <b id="mini-title"></b>
+      <span id="mini-artist"></span>
+    </div>
+    <button class="ctl small" id="mini-play">
+      <svg class="ic-play" viewBox="0 0 24 24"><path d="M7 4l14 8-14 8z"/></svg>
+      <svg class="ic-pause" viewBox="0 0 24 24"><path d="M7 4h4v16H7zM13 4h4v16h-4z"/></svg>
+    </button>
+  </div>
+
+  <audio id="audio" preload="auto"></audio>
+  <script src="viz.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
