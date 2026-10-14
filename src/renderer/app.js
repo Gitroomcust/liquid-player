@@ -23,6 +23,8 @@ let captureStartPromise = null;
 let runtimePlatform = '';
 let systemListSignature = '';
 let currentCover = null;
+let failedCover = null;
+let failedMiniCover = null;
 
 const fmtTime = (s) => { s = Math.max(0, Math.floor(s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : '');
@@ -358,25 +360,66 @@ function trackRow({ cover, title, sub, right, badge, playing, current, onClick, 
 }
 
 /* ---------- Now playing ---------- */
+function setMiniCover(src) {
+  const image = $('#mini-cover');
+  const fallback = $('#mini-cover-fallback');
+  if (!src || src === failedMiniCover) {
+    image.removeAttribute('src');
+    image.classList.add('hidden');
+    fallback.classList.remove('hidden');
+    return;
+  }
+  if (image.getAttribute('src') !== src) {
+    image.src = src;
+    failedMiniCover = null;
+  }
+  image.classList.remove('hidden');
+  fallback.classList.add('hidden');
+}
+
 function setCover(src) {
   const image = $('#cover');
   const fallback = $('#cover-fallback');
-  currentCover = src || null;
-  if (src) {
-    image.src = src;
+  currentCover = src && src !== failedCover ? src : null;
+  if (currentCover) {
+    image.src = currentCover;
     image.classList.remove('hidden');
     fallback.classList.add('hidden');
-    bgCover.style.backgroundImage = `url("${src.replace(/["\\\n\r]/g, '\\$&')}")`;
+    bgCover.style.backgroundImage = `url("${currentCover.replace(/["\\\n\r]/g, '\\$&')}")`;
     bgCover.classList.add('on');
-    Viz.paletteFromImage(src).then((colors) => (colors ? Viz.setPalette(colors) : Viz.resetPalette()));
+    Viz.paletteFromImage(currentCover).then((colors) => (colors ? Viz.setPalette(colors) : Viz.resetPalette()));
   } else {
     image.removeAttribute('src');
     image.classList.add('hidden');
     fallback.classList.remove('hidden');
+    bgCover.style.backgroundImage = '';
     bgCover.classList.remove('on');
     Viz.resetPalette();
   }
 }
+
+$('#cover').addEventListener('error', () => {
+  const image = $('#cover');
+  const src = image.getAttribute('src');
+  if (!src || src !== currentCover) return;
+  failedCover = src;
+  currentCover = null;
+  image.classList.add('hidden');
+  $('#cover-fallback').classList.remove('hidden');
+  bgCover.style.backgroundImage = '';
+  bgCover.classList.remove('on');
+  Viz.resetPalette();
+  setMiniCover(null);
+});
+
+$('#mini-cover').addEventListener('error', () => {
+  const image = $('#mini-cover');
+  const src = image.getAttribute('src');
+  if (!src || src !== currentCover) return;
+  failedMiniCover = src;
+  image.classList.add('hidden');
+  $('#mini-cover-fallback').classList.remove('hidden');
+});
 
 function setMeta({ title, artist, source }) {
   $('#np-title').textContent = title || 'Без названия';
@@ -384,9 +427,7 @@ function setMeta({ title, artist, source }) {
   $('#np-source').textContent = source || '';
   $('#mini-title').textContent = title || 'Без названия';
   $('#mini-artist').textContent = artist || '';
-  const miniCover = $('#mini-cover');
-  if (currentCover) miniCover.src = currentCover;
-  else miniCover.removeAttribute('src');
+  setMiniCover(currentCover);
 }
 
 function configurePlayerControls() {
