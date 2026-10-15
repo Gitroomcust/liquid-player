@@ -22,6 +22,10 @@ let systemGain = null;
 let captureStartPromise = null;
 let runtimePlatform = '';
 let androidCaptureActive = false;
+let latestCaptureStats = null;
+let captureSilence = false;
+let diagnosticsRefreshTimer = null;
+let diagnosticsCopyTimer = null;
 let androidFrequency = new Uint8Array(1024);
 const androidAnalyser = {
   frequencyBinCount: 1024,
@@ -91,6 +95,15 @@ function ensureCtx() {
 function captureActive() {
   if (runtimePlatform === 'android') return androidCaptureActive;
   return !!systemStream && systemStream.getAudioTracks().some((track) => track.readyState === 'live');
+}
+
+function updateCaptureSilenceState() {
+  if (runtimePlatform !== 'android') return;
+  const silent = androidCaptureActive && Number(latestCaptureStats?.silentMs) > 3000;
+  if (silent === captureSilence) return;
+  captureSilence = silent;
+  systemListSignature = '';
+  if (state.source === 'system' && state.screen === 'list') renderList();
 }
 
 function updateVisualizerSource() {
@@ -289,6 +302,7 @@ function renderList() {
   $('#list-sub').textContent = 'Поиск идёт постоянно — список обновляется сам';
   const signature = JSON.stringify({
     capture: captureActive(),
+    captureSilence,
     sessionAccess: !!window.api.needsSessionAccess?.(),
     sessions: state.sessions.map((item) => [item.id, item.title, item.artist, item.status, item.thumb?.length || 0]),
   });
@@ -303,22 +317,33 @@ function renderList() {
   }
   systemListSignature = signature;
   const fragment = document.createDocumentFragment();
+  const captureSilent = runtimePlatform === 'android' && captureActive() && captureSilence;
   fragment.appendChild(trackRow({
     title: platformText('Весь звук телефона', 'Весь звук компьютера'),
-    sub: platformText('Любой звук, который играет на телефоне', 'Любой звук, который играет на ПК'),
-    badge: captureActive() ? 'Слушаю' : 'Недоступно',
+    sub: captureSilent
+      ? 'Звук не поступает: ничего не играет или приложение запрещает захват'
+      : platformText('Любой звук, который играет на телефоне', 'Любой звук, который играет на ПК'),
+    badge: !captureActive() ? 'Недоступно' : captureSilent ? 'Тишина' : 'Слушаю',
     playing: captureActive(),
     current: state.current?.kind === 'capture',
     capture: true,
     onClick: selectCapture,
     delay: 0,
   }));
+  if (runtimePlatform === 'android') {
+    fragment.appendChild(trackRow({
+      title: 'Диагностика захвата',
+      sub: 'Журнал для отправки разработчику',
+      onClick: openCaptureDiagnostics,
+      delay: 1,
+    }));
+  }
   if (window.api.needsSessionAccess?.()) {
     fragment.appendChild(trackRow({
       title: 'Доступ к плеерам',
       sub: 'Нажмите, чтобы разрешить',
       onClick: () => window.api.requestSessionAccess(),
-      delay: 1,
+      delay: runtimePlatform === 'android' ? 2 : 1,
     }));
   }
   if (!state.sessions.length) {
@@ -332,7 +357,7 @@ function renderList() {
       playing: item.status === 'Playing',
       current: state.current?.kind === 'system' && state.current.id === item.id,
       onClick: () => selectSystem(item.id),
-      delay: index + 1,
+      delay: index + (runtimePlatform === 'android' ? 2 : 1),
       sessionId: item.id,
     })));
   }
@@ -756,6 +781,79 @@ function currentTrackInfo() {
   return { cover: item.thumb, title: item.title || $('#np-title').textContent, artist: item.artist || '', source: sessionAppName(item, state.current.id) };
 }
 
+async function refreshCaptureDiagnostics() {
+  const overlay = $('#capture-diagnostics');
+  if (runtimePlatform !== 'android' || overlay.hidden) return;
+  const lines = await window.api.getDiagnostics?.() || [];
+  if (overlay.hidden) return;
+  const log = $('#capture-diagnostics-log');
+  log.textContent = Array.isArray(lines) ? lines.join('\n') : '';
+  log.scrollTop = log.scrollHeight;
+}
+
+function openCaptureDiagnostics() {
+  if (runtimePlatform !== 'android') return;
+  const overlay = $('#capture-diagnostics');
+  overlay.hidden = false;
+  overlay.setAttribute('aria-hidden', 'false');
+  void refreshCaptureDiagnostics();
+  if (diagnosticsRefreshTimer === null) {
+    diagnosticsRefreshTimer = setInterval(() => { void refreshCaptureDiagnostics(); }, 1000);
+  }
+}
+
+function closeCaptureDiagnostics() {
+  if (runtimePlatform !== 'android') return;
+  const overlay = $('#capture-diagnostics');
+  overlay.hidden = true;
+  overlay.setAttribute('aria-hidden', 'true');
+  if (diagnosticsRefreshTimer !== null) {
+    clearInterval(diagnosticsRefreshTimer);
+    diagnosticsRefreshTimer = null;
+  }
+  if (diagnosticsCopyTimer !== null) {
+    clearTimeout(diagnosticsCopyTimer);
+    diagnosticsCopyTimer = null;
+  }
+  $('#capture-diagnostics-copy-status').textContent = '';
+}
+
+function showDiagnosticsCopied() {
+  const status = $('#capture-diagnostics-copy-status');
+  status.textContent = 'Скопировано';
+  if (diagnosticsCopyTimer !== null) clearTimeout(diagnosticsCopyTimer);
+  diagnosticsCopyTimer = setTimeout(() => {
+    status.textContent = '';
+    diagnosticsCopyTimer = null;
+  }, 1500);
+}
+
+async function copyCaptureDiagnostics() {
+  const text = $('#capture-diagnostics-log').textContent;
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable');
+    await navigator.clipboard.writeText(text);
+  } catch {
+    let copied = false;
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    try {
+      textarea.select();
+      copied = document.execCommand('copy');
+    } catch {
+      copied = false;
+    } finally {
+      textarea.remove();
+    }
+    if (!copied) return;
+  }
+  showDiagnosticsCopied();
+}
+
 /* ---------- Init ---------- */
 window.api.onSystemSessions(applySessions);
 window.api.onTracksMeta(applyTrackMetadata);
@@ -768,10 +866,16 @@ window.api.onCaptureFrame?.(({ frequency }) => {
 });
 window.api.onCaptureState?.(({ active }) => {
   androidCaptureActive = !!active;
+  updateCaptureSilenceState();
   if (!active && state.current?.kind === 'capture') setPlayingUI(false);
   refreshSystemSummary();
   updateVisualizerSource();
   if (state.source === 'system' && state.screen === 'list') renderList();
+});
+window.api.onCaptureStats?.((stats) => {
+  if (runtimePlatform !== 'android') return;
+  latestCaptureStats = stats || null;
+  updateCaptureSilenceState();
 });
 window.api.onSessionAccess?.(() => {
   if (state.source === 'system' && state.screen === 'list') {
@@ -780,10 +884,16 @@ window.api.onSessionAccess?.(() => {
   }
 });
 window.api.onBackButton?.(() => {
+  if (runtimePlatform === 'android' && !$('#capture-diagnostics').hidden) {
+    closeCaptureDiagnostics();
+    return;
+  }
   if (state.screen === 'player') showScreen('list');
   else if (state.screen === 'list') showScreen('home');
   else void window.api.minimizeApp?.();
 });
+$('#capture-diagnostics-close').addEventListener('click', closeCaptureDiagnostics);
+$('#capture-diagnostics-copy').addEventListener('click', () => { void copyCaptureDiagnostics(); });
 
 (async () => {
   const { name, platform } = await window.api.getUser();

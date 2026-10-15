@@ -11,6 +11,7 @@ import android.media.MediaMetadataRetriever;
 import android.media.session.MediaController;
 import android.media.session.MediaSessionManager;
 import android.media.session.PlaybackState;
+import android.media.projection.MediaProjectionConfig;
 import android.net.Uri;
 import android.os.Build;
 import android.os.SystemClock;
@@ -128,6 +129,14 @@ public class LiquidPlayerPlugin extends Plugin {
         JSObject state = new JSObject();
         state.put("active", active);
         activity.runOnUiThread(() -> plugin.notifyListeners("captureState", state));
+    }
+
+    static void emitCaptureStats(JSObject stats) {
+        LiquidPlayerPlugin plugin = instance;
+        if (plugin == null) return;
+        Activity activity = plugin.getActivity();
+        if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
+        activity.runOnUiThread(() -> plugin.notifyListeners("captureStats", stats));
     }
 
     @PluginMethod
@@ -480,54 +489,113 @@ public class LiquidPlayerPlugin extends Plugin {
 
     @PluginMethod
     public void startCapture(PluginCall call) {
+        CaptureLog.log("startCapture: manufacturer=" + Build.MANUFACTURER + ", model=" + Build.MODEL
+            + ", sdk=" + Build.VERSION.SDK_INT + ", release=" + Build.VERSION.RELEASE);
         if (Build.VERSION.SDK_INT < 29) {
+            CaptureLog.log("startCapture unavailable: Android API below 29");
             JSObject result = new JSObject();
             result.put("available", false);
             call.resolve(result);
             return;
         }
-        boolean needsAudio = getPermissionState("audio") != PermissionState.GRANTED;
+        PermissionState audioPermission = getPermissionState("audio");
+        PermissionState notificationPermission = Build.VERSION.SDK_INT >= 33
+            ? getPermissionState("notifications") : null;
+        CaptureLog.log("permission states before request: audio=" + audioPermission
+            + ", notifications=" + (notificationPermission == null ? "not required" : notificationPermission));
+        boolean needsAudio = audioPermission != PermissionState.GRANTED;
         boolean needsNotifications = Build.VERSION.SDK_INT >= 33
-            && getPermissionState("notifications") != PermissionState.GRANTED;
+            && notificationPermission != PermissionState.GRANTED;
         if (needsAudio || needsNotifications) {
             String[] aliases = Build.VERSION.SDK_INT >= 33
                 ? new String[] { "audio", "notifications" }
                 : new String[] { "audio" };
-            requestPermissionForAliases(aliases, call, "startProjection");
+            CaptureLog.log("requesting permissions: audio=" + needsAudio + ", notifications=" + needsNotifications);
+            try {
+                requestPermissionForAliases(aliases, call, "startProjection");
+            } catch (Exception error) {
+                CaptureLog.exception("permission request failed", error);
+                JSObject result = new JSObject();
+                result.put("available", false);
+                call.resolve(result);
+            }
             return;
         }
+        CaptureLog.log("permission states after request: audio=" + audioPermission
+            + ", notifications=" + (notificationPermission == null ? "not required" : notificationPermission));
         startProjection(call);
     }
 
     @PermissionCallback
     private void startProjection(PluginCall call) {
-        if (getPermissionState("audio") != PermissionState.GRANTED) {
+        PermissionState audioPermission = getPermissionState("audio");
+        PermissionState notificationPermission = Build.VERSION.SDK_INT >= 33
+            ? getPermissionState("notifications") : null;
+        CaptureLog.log("permission states after request: audio=" + audioPermission
+            + ", notifications=" + (notificationPermission == null ? "not required" : notificationPermission));
+        if (audioPermission != PermissionState.GRANTED) {
+            CaptureLog.log("capture not started: audio permission denied");
             JSObject result = new JSObject();
             result.put("available", false);
             call.resolve(result);
             return;
         }
-        Intent intent = ((android.media.projection.MediaProjectionManager) getContext()
-            .getSystemService(Context.MEDIA_PROJECTION_SERVICE)).createScreenCaptureIntent();
-        startActivityForResult(call, intent, "projectionResult");
+        try {
+            android.media.projection.MediaProjectionManager manager =
+                (android.media.projection.MediaProjectionManager) getContext()
+                    .getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+            Intent intent = Build.VERSION.SDK_INT >= 34
+                ? manager.createScreenCaptureIntent(MediaProjectionConfig.createConfigForDefaultDisplay())
+                : manager.createScreenCaptureIntent();
+            CaptureLog.log("requesting screen-capture consent"
+                + (Build.VERSION.SDK_INT >= 34 ? " for default display" : ""));
+            startActivityForResult(call, intent, "projectionResult");
+        } catch (Exception error) {
+            CaptureLog.exception("screen-capture consent request failed", error);
+            JSObject result = new JSObject();
+            result.put("available", false);
+            call.resolve(result);
+        }
     }
 
     @ActivityCallback
     private void projectionResult(PluginCall call, ActivityResult result) {
-        if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null) {
+        int resultCode = result.getResultCode();
+        Intent resultData = result.getData();
+        CaptureLog.log("consent resultCode=" + resultCode + ", data is null=" + (resultData == null));
+        if (resultCode != Activity.RESULT_OK || resultData == null) {
+            CaptureLog.log("capture consent was not granted");
             JSObject state = new JSObject();
             state.put("available", false);
             call.resolve(state);
             return;
         }
         Intent service = new Intent(getContext(), PlaybackCaptureService.class);
-        service.putExtra("resultCode", result.getResultCode());
-        service.putExtra("data", result.getData());
-        if (Build.VERSION.SDK_INT >= 26) getContext().startForegroundService(service);
-        else getContext().startService(service);
+        service.putExtra("resultCode", resultCode);
+        service.putExtra("data", resultData);
+        try {
+            CaptureLog.log("calling " + (Build.VERSION.SDK_INT >= 26 ? "startForegroundService" : "startService"));
+            if (Build.VERSION.SDK_INT >= 26) getContext().startForegroundService(service);
+            else getContext().startService(service);
+        } catch (Exception error) {
+            CaptureLog.exception("capture service start failed", error);
+            JSObject state = new JSObject();
+            state.put("available", false);
+            call.resolve(state);
+            return;
+        }
         JSObject state = new JSObject();
         state.put("available", true);
         call.resolve(state);
+    }
+
+    @PluginMethod
+    public void getDiagnostics(PluginCall call) {
+        JSArray lines = new JSArray();
+        for (String line : CaptureLog.snapshot()) lines.put(line);
+        JSObject result = new JSObject();
+        result.put("lines", lines);
+        call.resolve(result);
     }
 
     @PluginMethod

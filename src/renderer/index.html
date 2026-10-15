@@ -108,6 +108,23 @@
     </button>
   </div>
 
+  <section id="capture-diagnostics" class="capture-diagnostics" hidden aria-hidden="true">
+    <div class="glass capture-diagnostics__panel" role="dialog" aria-modal="true" aria-labelledby="capture-diagnostics-title">
+      <header class="capture-diagnostics__header">
+        <div>
+          <h2 id="capture-diagnostics-title">Диагностика захвата</h2>
+          <p>Журнал для отправки разработчику</p>
+        </div>
+      </header>
+      <pre id="capture-diagnostics-log" class="capture-diagnostics__log"></pre>
+      <footer class="capture-diagnostics__actions">
+        <span id="capture-diagnostics-copy-status" role="status" aria-live="polite"></span>
+        <button id="capture-diagnostics-copy" type="button">Копировать</button>
+        <button id="capture-diagnostics-close" type="button">Закрыть</button>
+      </footer>
+    </div>
+  </section>
+
   <audio id="audio" preload="auto"></audio>
   <script src="viz.js"></script>
   <script src="app.js"></script>

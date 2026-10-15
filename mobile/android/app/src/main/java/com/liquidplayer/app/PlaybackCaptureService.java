@@ -14,10 +14,15 @@ import android.media.AudioRecord;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Base64;
 
 import com.getcapacitor.JSObject;
+
+import java.util.Locale;
 
 public class PlaybackCaptureService extends Service {
     private volatile boolean running;
@@ -27,25 +32,68 @@ public class PlaybackCaptureService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        CaptureLog.log("PlaybackCaptureService.onStartCommand startId=" + startId);
         if (Build.VERSION.SDK_INT < 29 || intent == null) {
+            CaptureLog.log("capture unavailable: API below 29 or service intent is null");
             failCaptureStart();
             return START_NOT_STICKY;
         }
-        createNotification();
-        if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(41, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
-        } else {
-            startForeground(41, notification());
+
+        Notification captureNotification;
+        try {
+            captureNotification = notification();
+        } catch (Exception error) {
+            CaptureLog.exception("capture notification creation failed", error);
+            failCaptureStart();
+            return START_NOT_STICKY;
         }
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                startForeground(41, captureNotification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                        | ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
+                CaptureLog.log("startForeground succeeded: mediaProjection|microphone");
+            } catch (Exception error) {
+                CaptureLog.exception("startForeground mediaProjection|microphone failed", error);
+                try {
+                    startForeground(41, captureNotification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+                    CaptureLog.log("startForeground succeeded: mediaProjection fallback");
+                } catch (Exception fallbackError) {
+                    CaptureLog.exception("startForeground mediaProjection fallback failed", fallbackError);
+                    failCaptureStart();
+                    return START_NOT_STICKY;
+                }
+            }
+        } else {
+            try {
+                startForeground(41, captureNotification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+                CaptureLog.log("startForeground succeeded: mediaProjection");
+            } catch (Exception error) {
+                CaptureLog.exception("startForeground mediaProjection failed", error);
+                failCaptureStart();
+                return START_NOT_STICKY;
+            }
+        }
+
         int resultCode = intent.getIntExtra("resultCode", 0);
         Intent resultData = intent.getParcelableExtra("data");
         try {
             MediaProjectionManager manager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
             projection = manager.getMediaProjection(resultCode, resultData);
+            CaptureLog.log("getMediaProjection result=" + (projection != null));
             if (projection == null) {
+                CaptureLog.log("capture start failed: getMediaProjection returned null");
                 failCaptureStart();
                 return START_NOT_STICKY;
             }
+            projection.registerCallback(new MediaProjection.Callback() {
+                @Override
+                public void onStop() {
+                    CaptureLog.log("projection stopped by system");
+                    stopSelf();
+                }
+            }, new Handler(Looper.getMainLooper()));
+            CaptureLog.log("MediaProjection callback registered");
 
             AudioPlaybackCaptureConfiguration config = new AudioPlaybackCaptureConfiguration.Builder(projection)
                 .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
@@ -58,23 +106,35 @@ public class PlaybackCaptureService extends Service {
                 .setSampleRate(sampleRate)
                 .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
                 .build();
-            int buffer = Math.max(AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT), 4096);
+            int minBufferSize = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+            CaptureLog.log("AudioRecord.getMinBufferSize=" + minBufferSize);
+            int buffer = Math.max(minBufferSize, 4096);
             recorder = new AudioRecord.Builder()
                 .setAudioFormat(format)
                 .setBufferSizeInBytes(buffer)
                 .setAudioPlaybackCaptureConfig(config)
                 .build();
-            if (recorder.getState() != AudioRecord.STATE_INITIALIZED) {
+            int recorderState = recorder.getState();
+            CaptureLog.log("AudioRecord.getState()=" + recorderState);
+            if (recorderState != AudioRecord.STATE_INITIALIZED) {
                 failCaptureStart();
                 return START_NOT_STICKY;
             }
             recorder.startRecording();
-        } catch (Exception ignored) {
+            int recordingState = recorder.getRecordingState();
+            CaptureLog.log("AudioRecord.getRecordingState() after startRecording=" + recordingState);
+            if (recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                failCaptureStart();
+                return START_NOT_STICKY;
+            }
+        } catch (Exception error) {
+            CaptureLog.exception("projection or AudioRecord initialization failed", error);
             failCaptureStart();
             return START_NOT_STICKY;
         }
 
         running = true;
+        CaptureLog.log("AudioRecord started; beginning capture reader");
         LiquidPlayerPlugin.emitCaptureState(true);
         AudioRecord activeRecorder = recorder;
         readerThread = new Thread(() -> readAudio(activeRecorder), "liquid-player-capture");
@@ -95,8 +155,6 @@ public class PlaybackCaptureService extends Service {
             .build();
     }
 
-    private void createNotification() { notification(); }
-
     private void failCaptureStart() {
         running = false;
         LiquidPlayerPlugin.emitCaptureState(false);
@@ -105,19 +163,72 @@ public class PlaybackCaptureService extends Service {
 
     private void readAudio(AudioRecord activeRecorder) {
         short[] samples = new short[2048];
+        long framesRead = 0;
+        long lastStatsAt = SystemClock.elapsedRealtime();
+        long lastLogAt = lastStatsAt;
+        long lastNonZeroSampleAt = lastStatsAt;
+        int peakRaw = 0;
+        double sumSquares = 0;
+        int samplesInWindow = 0;
         while (running) {
             int read;
             try {
                 read = activeRecorder.read(samples, 0, samples.length);
-            } catch (IllegalStateException ignored) {
+            } catch (Exception error) {
+                CaptureLog.exception("AudioRecord.read failed", error);
                 break;
             }
             if (!running) break;
-            if (read < 0) break;
+            if (read < 0) {
+                CaptureLog.log("AudioRecord.read returned error code " + read);
+                break;
+            }
             if (read <= 0) continue;
+
+            boolean hasNonZeroSample = false;
+            for (int i = 0; i < read; i++) {
+                int sample = samples[i];
+                int magnitude = Math.abs(sample);
+                peakRaw = Math.max(peakRaw, magnitude);
+                double normalized = sample / 32768.0;
+                sumSquares += normalized * normalized;
+                samplesInWindow++;
+                if (sample != 0) hasNonZeroSample = true;
+            }
+            long now = SystemClock.elapsedRealtime();
+            framesRead += read;
+            if (hasNonZeroSample) lastNonZeroSampleAt = now;
+            if (now - lastStatsAt >= 1000) {
+                double rmsDb = samplesInWindow == 0 || sumSquares == 0
+                    ? -120 : 20 * Math.log10(Math.sqrt(sumSquares / samplesInWindow));
+                double peak = peakRaw / 32768.0;
+                long silentMs = peakRaw == 0 ? now - lastNonZeroSampleAt : 0;
+                JSObject stats = new JSObject();
+                stats.put("frames", framesRead);
+                stats.put("peak", peak);
+                stats.put("rmsDb", rmsDb);
+                stats.put("silentMs", silentMs);
+                LiquidPlayerPlugin.emitCaptureStats(stats);
+                if (now - lastLogAt >= 2000) {
+                    CaptureLog.log(String.format(Locale.US,
+                        "capture stats: frames=%d, peak=%.4f, rmsDb=%.1f, silentMs=%d",
+                        framesRead, peak, rmsDb, silentMs));
+                    lastLogAt = now;
+                }
+                lastStatsAt = now;
+                peakRaw = 0;
+                sumSquares = 0;
+                samplesInWindow = 0;
+            }
+
             JSObject frame = new JSObject();
             frame.put("frequency", Base64.encodeToString(fft(samples, read), Base64.NO_WRAP));
             LiquidPlayerPlugin.emitCaptureFrame(frame);
+        }
+        if (running) {
+            running = false;
+            LiquidPlayerPlugin.emitCaptureState(false);
+            stopSelf();
         }
     }
 
@@ -169,12 +280,14 @@ public class PlaybackCaptureService extends Service {
 
     @Override
     public void onDestroy() {
+        CaptureLog.log("PlaybackCaptureService.onDestroy");
         running = false;
         Thread reader = readerThread;
         if (reader != null && reader != Thread.currentThread()) {
             try {
                 reader.join(500);
-            } catch (InterruptedException ignored) {
+            } catch (InterruptedException error) {
+                CaptureLog.exception("capture reader join interrupted", error);
                 Thread.currentThread().interrupt();
             }
         }
@@ -185,12 +298,22 @@ public class PlaybackCaptureService extends Service {
                     && recorder.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) {
                     recorder.stop();
                 }
-            } catch (IllegalStateException ignored) {}
-            recorder.release();
+            } catch (Exception error) {
+                CaptureLog.exception("AudioRecord.stop failed during teardown", error);
+            }
+            try {
+                recorder.release();
+            } catch (Exception error) {
+                CaptureLog.exception("AudioRecord.release failed during teardown", error);
+            }
             recorder = null;
         }
         if (projection != null) {
-            try { projection.stop(); } catch (IllegalStateException ignored) {}
+            try {
+                projection.stop();
+            } catch (Exception error) {
+                CaptureLog.exception("MediaProjection.stop failed during teardown", error);
+            }
             projection = null;
         }
         LiquidPlayerPlugin.emitCaptureState(false);

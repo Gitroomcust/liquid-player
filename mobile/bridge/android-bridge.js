@@ -71,6 +71,15 @@
     stopCapture: () => native?.stopCapture ? native.stopCapture() : Promise.resolve(),
     onCaptureFrame: (callback) => subscribe(native, 'captureFrame', callback),
     onCaptureState: (callback) => subscribe(native, 'captureState', callback),
+    onCaptureStats: (callback) => subscribe(native, 'captureStats', callback),
+    getDiagnostics: async () => {
+      if (!native?.getDiagnostics) return [];
+      try {
+        return (await native.getDiagnostics())?.lines || [];
+      } catch {
+        return [];
+      }
+    },
     needsSessionAccess: () => sessionAccess,
     requestSessionAccess: () => native?.requestSessionAccess ? native.requestSessionAccess() : Promise.resolve(),
     onSessionAccess: (callback) => {
