@@ -34,9 +34,14 @@ npm start
 - [Windows](https://github.com/Gitroomcust/liquid-player/releases/tag/vX-windows) — `liquid-player-X-windows-x64-setup.exe` (установщик) и `liquid-player-X-windows-x64-portable.exe` (без установки)
 - [macOS](https://github.com/Gitroomcust/liquid-player/releases/tag/vX-macos) — `liquid-player-X-mac-arm64.zip` / `liquid-player-X-mac-arm64.dmg` (Apple Silicon) и `liquid-player-X-mac-x64.zip` / `liquid-player-X-mac-x64.dmg` (Intel)
 - [Linux](https://github.com/Gitroomcust/liquid-player/releases/tag/vX-linux) — `liquid-player-X-linux-x64.AppImage`, `.deb` или `.tar.gz`
+- [Android](https://github.com/Gitroomcust/liquid-player/releases/tag/vX-android) — `liquid-player-X-android.apk` (Android 7.0+, захват всего звука — Android 10+)
 
 Сборки macOS не подписаны: при первом запуске нажмите правой кнопкой на приложении → «Открыть» или выполните `xattr -cr <путь-к-приложению>`. Захват системного звука доступен на macOS 14.2 и новее.
 Релизы собираются GitHub Actions при отправке тега `vX.Y.Z`; публикация нового релиза заменяет предыдущие релизы и теги.
+
+### Android
+
+Скачайте APK и установите его, разрешив установку из неизвестных источников. Для «Весь звук телефона» разрешите запись звука/экрана, а для «Доступ к плеерам» — доступ к уведомлениям.
 
 ## Сборка
 ```bash

@@ -1,0 +1,74 @@
+name: Android Release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+-android']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+      - run: npm ci
+        working-directory: mobile
+      - run: npm run build:www
+        working-directory: mobile
+      - run: npx cap sync android
+        working-directory: mobile
+      - name: Build Android APK
+        run: chmod +x gradlew && ./gradlew testDebugUnitTest assembleDebug --no-daemon
+        working-directory: mobile/android
+      - name: Verify release version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          V="${V%-android}"
+          grep -Fq "versionName \"$V\"" mobile/android/app/build.gradle || {
+            echo "Tag version $V does not match mobile/android/app/build.gradle"
+            exit 1
+          }
+      - name: Stage release APK
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          V="${V%-android}"
+          cp mobile/android/app/build/outputs/apk/debug/app-debug.apk "liquid-player-$V-android.apk"
+      - name: Delete previous Android releases
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for t in $(gh release list --limit 200 --json tagName -q '.[].tagName'); do
+            case "$t" in
+              *-android)
+                if [ "$t" != "$GITHUB_REF_NAME" ]; then
+                  gh release delete "$t" --cleanup-tag --yes
+                fi
+                ;;
+            esac
+          done
+      - name: Publish Android release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          V="${V%-android}"
+          gh release create "$GITHUB_REF_NAME" "liquid-player-$V-android.apk" \
+            --verify-tag \
+            --title "Liquid Player $V — Android" \
+            --notes "Android 7.0+; «Весь звук телефона» требует Android 10+ и разрешения на запись звука/экрана; «Другие приложения» требуют доступа к уведомлениям; APK подписан отладочным ключом сборки GitHub — если ставили APK, присланный вручную, удалите его перед установкой (другая подпись); часть приложений (DRM-стриминги) запрещают захват своего звука."

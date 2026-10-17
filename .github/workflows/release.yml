@@ -59,6 +59,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           for t in $(gh release list --limit 200 --json tagName -q '.[].tagName'); do
+            case "$t" in
+              *-android) continue ;;
+            esac
             gh release delete "$t" --cleanup-tag --yes
           done
       - name: Publish Windows release
