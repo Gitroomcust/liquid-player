@@ -855,35 +855,46 @@ async function copyCaptureDiagnostics() {
 }
 
 /* ---------- Init ---------- */
-window.api.onSystemSessions(applySessions);
-window.api.onTracksMeta(applyTrackMetadata);
-window.api.onCaptureFrame?.(({ frequency }) => {
+function safely(fn) {
+  try {
+    fn();
+  } catch (error) {
+    console.error('API event listener registration failed', error);
+    try {
+      window.api.logJs?.(`Renderer listener registration failed: ${error?.message || error}`);
+    } catch {}
+  }
+}
+
+safely(() => window.api.onSystemSessions(applySessions));
+safely(() => window.api.onTracksMeta(applyTrackMetadata));
+safely(() => window.api.onCaptureFrame?.(({ frequency }) => {
   if (!frequency) return;
   const decoded = atob(frequency);
   const length = Math.min(decoded.length, androidFrequency.length);
   for (let i = 0; i < length; i++) androidFrequency[i] = decoded.charCodeAt(i);
   androidFrequency.fill(0, length);
-});
-window.api.onCaptureState?.(({ active }) => {
+}));
+safely(() => window.api.onCaptureState?.(({ active }) => {
   androidCaptureActive = !!active;
   updateCaptureSilenceState();
   if (!active && state.current?.kind === 'capture') setPlayingUI(false);
   refreshSystemSummary();
   updateVisualizerSource();
   if (state.source === 'system' && state.screen === 'list') renderList();
-});
-window.api.onCaptureStats?.((stats) => {
+}));
+safely(() => window.api.onCaptureStats?.((stats) => {
   if (runtimePlatform !== 'android') return;
   latestCaptureStats = stats || null;
   updateCaptureSilenceState();
-});
-window.api.onSessionAccess?.(() => {
+}));
+safely(() => window.api.onSessionAccess?.(() => {
   if (state.source === 'system' && state.screen === 'list') {
     systemListSignature = '';
     renderList();
   }
-});
-window.api.onBackButton?.(() => {
+}));
+safely(() => window.api.onBackButton?.(() => {
   if (runtimePlatform === 'android' && !$('#capture-diagnostics').hidden) {
     closeCaptureDiagnostics();
     return;
@@ -891,7 +902,7 @@ window.api.onBackButton?.(() => {
   if (state.screen === 'player') showScreen('list');
   else if (state.screen === 'list') showScreen('home');
   else void window.api.minimizeApp?.();
-});
+}));
 $('#capture-diagnostics-close').addEventListener('click', closeCaptureDiagnostics);
 $('#capture-diagnostics-copy').addEventListener('click', () => { void copyCaptureDiagnostics(); });
 

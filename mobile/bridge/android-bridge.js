@@ -5,6 +5,39 @@
   const appPlugin = plugins.App;
   let coverDir = '';
   let sessionAccess = false;
+  let firstCaptureFrameLogged = false;
+  const jsLogLines = [];
+  const describeError = (error) => error instanceof Error
+    ? `${error.name}: ${error.message}`
+    : String(error);
+  const logJs = (message) => {
+    const line = `${new Date().toISOString().slice(11, 23)} ${message}`;
+    jsLogLines.push(line);
+    if (jsLogLines.length > 200) jsLogLines.shift();
+    console.info(`[LiquidPlayer] ${line}`);
+    return line;
+  };
+
+  let platform = 'unknown';
+  try {
+    platform = Capacitor?.getPlatform?.() || 'unknown';
+  } catch (error) {
+    logJs(`getPlatform failed: ${describeError(error)}`);
+  }
+  let pluginMethods = [];
+  try {
+    pluginMethods = Object.keys(native || {}).filter((name) => typeof native[name] === 'function');
+  } catch (error) {
+    logJs(`LiquidPlayer method inspection failed: ${describeError(error)}`);
+  }
+  logJs(`bridge startup: Capacitor=${!!Capacitor}, platform=${platform}, Plugins=[${Object.keys(plugins).join(', ')}], LiquidPlayer=${!!native}, methods=[${pluginMethods.join(', ')}]`);
+
+  window.addEventListener('error', (event) => {
+    logJs(`window error: ${event.message || describeError(event.error)} at ${event.filename || 'unknown'}:${event.lineno || 0}:${event.colno || 0}`);
+  });
+  window.addEventListener('unhandledrejection', (event) => {
+    logJs(`unhandled rejection: ${describeError(event.reason)}`);
+  });
 
   const dispatchAccess = (required) => {
     sessionAccess = !!required;
@@ -12,20 +45,38 @@
   };
 
   const accessPromise = native?.getCoverDir
-    ? native.getCoverDir().then((result) => { coverDir = result.path || ''; })
+    ? Promise.resolve()
+      .then(() => native.getCoverDir())
+      .then((result) => { coverDir = result?.path || ''; })
+      .catch((error) => { logJs(`getCoverDir failed: ${describeError(error)}`); })
     : Promise.resolve();
 
   const subscribe = (plugin, eventName, callback) => {
     if (!plugin?.addListener) return () => {};
     let handle;
     let removed = false;
-    plugin.addListener(eventName, callback).then((result) => {
-      handle = result;
-      if (removed) handle.remove();
-    });
+    const removeHandle = () => {
+      try {
+        Promise.resolve(handle?.remove?.()).catch((error) => {
+          logJs(`Subscription removal failed for ${eventName}: ${describeError(error)}`);
+        });
+      } catch (error) {
+        logJs(`Subscription removal failed for ${eventName}: ${describeError(error)}`);
+      }
+    };
+    try {
+      Promise.resolve(plugin.addListener(eventName, callback)).then((result) => {
+        handle = result;
+        if (removed) removeHandle();
+      }).catch((error) => {
+        logJs(`Subscription failed for ${eventName}: ${describeError(error)}`);
+      });
+    } catch (error) {
+      logJs(`Subscription failed for ${eventName}: ${describeError(error)}`);
+    }
     return () => {
       removed = true;
-      if (handle) handle.remove();
+      removeHandle();
     };
   };
 
@@ -34,11 +85,13 @@
     try {
       const result = await native.needsSessionAccess();
       dispatchAccess(result.required);
-    } catch {}
+    } catch (error) {
+      logJs(`needsSessionAccess failed: ${describeError(error)}`);
+    }
   }
 
   if (appPlugin?.addListener) {
-    appPlugin.addListener('appStateChange', ({ isActive }) => {
+    subscribe(appPlugin, 'appStateChange', ({ isActive } = {}) => {
       if (isActive) void refreshSessionAccess();
     });
   }
@@ -46,9 +99,19 @@
 
   window.api = {
     getUser: async () => {
-      await accessPromise;
-      if (!native?.getUser) return { name: '', platform: 'android' };
-      return native.getUser();
+      let timeoutId;
+      await Promise.race([
+        accessPromise,
+        new Promise((resolve) => { timeoutId = setTimeout(resolve, 2000); }),
+      ]);
+      clearTimeout(timeoutId);
+      try {
+        const user = native?.getUser ? await native.getUser() : null;
+        return { name: user?.name || '', platform: 'android' };
+      } catch (error) {
+        logJs(`getUser failed: ${describeError(error)}`);
+        return { name: '', platform: 'android' };
+      }
     },
     pickFolder: () => native?.pickFolder ? native.pickFolder() : Promise.resolve(null),
     systemControl: (id, action) => native?.systemControl ? native.systemControl({ id, action }) : Promise.resolve(false),
@@ -60,26 +123,46 @@
       return Capacitor.convertFileSrc(`file://${coverDir}/${window.LiquidPlayerFNV1a32(path)}.jpg`);
     },
     startCapture: async () => {
-      if (!native?.startCapture) return false;
+      logJs('startCapture called');
+      if (!native?.startCapture) {
+        logJs('startCapture error: native method unavailable');
+        return false;
+      }
       try {
         const result = await native.startCapture();
+        logJs(`startCapture result: ${JSON.stringify(result)}`);
         return result.available !== false;
-      } catch {
+      } catch (error) {
+        logJs(`startCapture error: ${describeError(error)}`);
         return false;
       }
     },
     stopCapture: () => native?.stopCapture ? native.stopCapture() : Promise.resolve(),
-    onCaptureFrame: (callback) => subscribe(native, 'captureFrame', callback),
-    onCaptureState: (callback) => subscribe(native, 'captureState', callback),
+    onCaptureFrame: (callback) => subscribe(native, 'captureFrame', (frame) => {
+      if (!firstCaptureFrameLogged) {
+        firstCaptureFrameLogged = true;
+        logJs(`first captureFrame received: fields=[${Object.keys(frame || {}).join(', ')}]`);
+      }
+      callback(frame);
+    }),
+    onCaptureState: (callback) => subscribe(native, 'captureState', (state) => {
+      logJs(`captureState event: ${JSON.stringify(state)}`);
+      callback(state);
+    }),
     onCaptureStats: (callback) => subscribe(native, 'captureStats', callback),
     getDiagnostics: async () => {
-      if (!native?.getDiagnostics) return [];
+      let nativeLines = [];
       try {
-        return (await native.getDiagnostics())?.lines || [];
-      } catch {
-        return [];
+        if (native?.getDiagnostics) {
+          const result = await native.getDiagnostics();
+          nativeLines = Array.isArray(result?.lines) ? result.lines : [];
+        }
+      } catch (error) {
+        logJs(`getDiagnostics failed: ${describeError(error)}`);
       }
+      return [...nativeLines, '--- JS ---', ...jsLogLines];
     },
+    logJs,
     needsSessionAccess: () => sessionAccess,
     requestSessionAccess: () => native?.requestSessionAccess ? native.requestSessionAccess() : Promise.resolve(),
     onSessionAccess: (callback) => {
